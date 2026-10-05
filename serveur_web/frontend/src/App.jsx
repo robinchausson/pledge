@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef } from 'react'
 
 const API_URL = import.meta.env.VITE_API_URL || ''
+const WS_URL = API_URL ? API_URL.replace(/^http/, 'ws') : `ws://${window.location.host}`
 
 
 
@@ -141,7 +142,7 @@ function StreamerInterface({ user }) {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
       videoRef.current.srcObject = stream
       
-      const socket = new WebSocket(`ws://localhost:8000/api/stream/publish/${user.email}`)
+      const socket = new WebSocket(`${WS_URL}/api/stream/publish/${user.email}`)
       socket.onopen = () => {
         setStreaming(true)
         // Note: mimeType fallback if vp8 is not supported on this browser (ex: Safari)
@@ -214,7 +215,7 @@ function ViewerInterface({ user }) {
     if (!targetId) return
     setWatching(true)
     
-    const socket = new WebSocket(`ws://localhost:8000/api/stream/watch/${targetId}`)
+    const socket = new WebSocket(`${WS_URL}/api/stream/watch/${targetId}`)
     socket.binaryType = "arraybuffer"
     
     const mediaSource = new MediaSource()

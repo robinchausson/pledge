@@ -151,7 +151,7 @@ async def routeur_wss(websocket, path):
         await websocket.close(code=1011, reason="Action inconnue")
 
 async def boucle_principale_wss():
-    async with websockets.serve(routeur_wss, "0.0.0.0", PORT_WSS):
+    async with websockets.serve(routeur_wss, "0.0.0.0", PORT_WSS, max_size=None, ping_timeout=120, ping_interval=60):
         print(f"[{NODE_ID}] Serveur WSS en écoute sur le port {PORT_WSS}...")
         await asyncio.Future()
 

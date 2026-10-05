@@ -58,7 +58,7 @@ async def publish_stream(websocket: WebSocket, client_id: str, db: Session = Dep
     edge_ws_url = f"ws://{target_node.ip_address}:{target_node.wss_port}/upload/{client_id}"
     
     try:
-        async with websockets.connect(edge_ws_url) as edge_ws:
+        async with websockets.connect(edge_ws_url, max_size=None, ping_timeout=120, ping_interval=60) as edge_ws:
             print(f"[Backend] Connecté avec succès au noeud Edge {target_node.node_id}")
             
             try:
@@ -140,7 +140,7 @@ async def watch_stream(websocket: WebSocket, client_id: str, db: Session = Depen
     edge_ws_url = f"ws://{source_node.ip_address}:{source_node.wss_port}/download/{client_id}"
     
     try:
-        async with websockets.connect(edge_ws_url) as edge_ws:
+        async with websockets.connect(edge_ws_url, max_size=None, ping_timeout=120, ping_interval=60) as edge_ws:
             print(f"[Backend] Connecté au noeud Edge {source_node.node_id} pour lecture")
             
             try:
