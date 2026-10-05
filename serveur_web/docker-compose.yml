@@ -6,9 +6,9 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - BROKER_IP=${TAILSCALE_IP_BROKER:-100.x.x.x}
+      - BROKER_IP=${LAN_IP_BROKER:-192.168.x.x}
       - BROKER_PORT=1883
-      - CRYPTO_URL_ZONE_1=${TAILSCALE_URL_CRYPTO_1:-https://100.x.x.x:8443}
+      - CRYPTO_URL_ZONE_1=${LAN_URL_CRYPTO_1:-https://192.168.x.x:8443}
     volumes:
       - ./backend/data:/app/data
       - /var/run/docker.sock:/var/run/docker.sock
@@ -20,4 +20,4 @@ services:
     ports:
       - "5173:5173"
     environment:
-      - VITE_API_URL=${TAILSCALE_URL_BACKEND:-http://100.x.x.x:8000}
+      - VITE_API_URL=${LAN_URL_BACKEND:-http://192.168.x.x:8000}

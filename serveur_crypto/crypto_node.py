@@ -32,6 +32,9 @@ def point_to_json(point: tuple) -> list[int]:
     return [int(coordinate.n) if hasattr(coordinate, "n") else int(coordinate) for coordinate in point]
 
 
+import functools
+
+@functools.lru_cache(maxsize=1)
 def reconstruct_matrix_a(seed: int) -> np.ndarray:
     generator = np.random.default_rng(seed)
     return generator.integers(0, SIS_Q, size=(SIS_L, SIS_M), dtype=np.int64)

@@ -64,7 +64,7 @@ origins = [
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
-    allow_origin_regex=r"http://100\.\d+\.\d+\.\d+(:5173)?", # Autorise les IPs Tailscale
+    allow_origin_regex=r"http://(10\.\d+|100\.\d+|192\.168)\.\d+\.\d+(:5173)?", # Autorise les IPs Tailscale et LAN
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
