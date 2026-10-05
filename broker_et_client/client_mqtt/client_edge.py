@@ -84,28 +84,74 @@ def thread_telemetrie_mqtt():
 # ==========================================
 # 2. PLAN DE DONNÉES : ISOLATION ET WSS (Programme principal)
 # ==========================================
-async def reception_flux_video(websocket, path):
-    client_id = path.strip("/")
-    if not client_id:
-        client_id = "Client_Inconnu"
-        
+async def reception_flux_video(websocket, client_id):
     dossier_client = os.path.join(DOSSIER_RACINE_STOCKAGE, client_id)
     os.makedirs(dossier_client, exist_ok=True)
     
-    print(f"[{NODE_ID}] Nouvelle connexion WSS. Espace alloué pour : {client_id}")
+    print(f"[{NODE_ID}] Nouvelle connexion WSS (Upload). Espace alloué pour : {client_id}")
 
     compteur_bloc = 0
-    async for message in websocket:
+    try:
+        async for message in websocket:
+            chemin_fichier = os.path.join(dossier_client, f"bloc_{compteur_bloc}.dat")
+            with open(chemin_fichier, "wb") as f:
+                f.write(message)
+                
+            print(f"[{NODE_ID}] {client_id} -> Bloc {compteur_bloc} isolé et stocké.")
+            await websocket.send(json.dumps({"statut": "ok", "bloc_id": compteur_bloc}))
+            compteur_bloc += 1
+    except websockets.exceptions.ConnectionClosed:
+        print(f"[{NODE_ID}] Diffuseur déconnecté.")
+
+async def envoi_flux_video(websocket, client_id):
+    dossier_client = os.path.join(DOSSIER_RACINE_STOCKAGE, client_id)
+    if not os.path.exists(dossier_client):
+        await websocket.close(code=1011, reason="Client introuvable")
+        return
+        
+    print(f"[{NODE_ID}] Nouvelle connexion WSS (Download) pour : {client_id}")
+    compteur_bloc = 0
+    
+    while True:
         chemin_fichier = os.path.join(dossier_client, f"bloc_{compteur_bloc}.dat")
-        with open(chemin_fichier, "wb") as f:
-            f.write(message)
-            
-        print(f"[{NODE_ID}] {client_id} -> Bloc {compteur_bloc} isolé et stocké.")
-        await websocket.send(json.dumps({"statut": "ok", "bloc_id": compteur_bloc}))
-        compteur_bloc += 1
+        if os.path.exists(chemin_fichier):
+            try:
+                with open(chemin_fichier, "rb") as f:
+                    donnees = f.read()
+                await websocket.send(donnees)
+                print(f"[{NODE_ID}] {client_id} -> Bloc {compteur_bloc} envoyé au visionneur.")
+                
+                # Attente d'un accusé de réception du backend
+                ack = await websocket.recv()
+                compteur_bloc += 1
+            except websockets.exceptions.ConnectionClosed:
+                print(f"[{NODE_ID}] Visionneur déconnecté.")
+                break
+            except Exception as e:
+                print(f"[{NODE_ID}] Erreur de lecture/envoi: {e}")
+                break
+        else:
+            # Le bloc n'existe pas encore (attente du direct ou fin du flux)
+            await asyncio.sleep(0.5)
+
+async def routeur_wss(websocket, path):
+    parts = path.strip("/").split("/")
+    if len(parts) >= 2:
+        action = parts[0]
+        client_id = parts[1]
+    else:
+        action = "upload"
+        client_id = parts[0] if len(parts) > 0 and parts[0] else "Client_Inconnu"
+        
+    if action == "upload":
+        await reception_flux_video(websocket, client_id)
+    elif action == "download":
+        await envoi_flux_video(websocket, client_id)
+    else:
+        await websocket.close(code=1011, reason="Action inconnue")
 
 async def boucle_principale_wss():
-    async with websockets.serve(reception_flux_video, "0.0.0.0", PORT_WSS):
+    async with websockets.serve(routeur_wss, "0.0.0.0", PORT_WSS):
         print(f"[{NODE_ID}] Serveur WSS en écoute sur le port {PORT_WSS}...")
         await asyncio.Future()
 

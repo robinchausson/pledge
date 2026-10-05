@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 
 const API_URL = import.meta.env.VITE_API_URL || ''
 
@@ -104,22 +104,170 @@ function Home({ openAuth }) {
   )
 }
 
-function Dashboard({ user, onLogout }) {
-  const [stream, setStream] = useState(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
+function StreamerInterface({ user }) {
+  const [streaming, setStreaming] = useState(false)
+  const [ws, setWs] = useState(null)
+  const [mediaRecorder, setMediaRecorder] = useState(null)
+  const videoRef = useRef()
 
-  async function checkStream() {
-    setLoading(true)
-    setError('')
-    try { setStream(await apiRequest('/api/stream/status')) } catch (requestError) { setError(requestError.message) } finally { setLoading(false) }
+  async function startStream() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+      videoRef.current.srcObject = stream
+      
+      const socket = new WebSocket(`ws://localhost:8000/api/stream/publish/${user.email}`)
+      socket.onopen = () => {
+        setStreaming(true)
+        // Note: mimeType fallback if vp8 is not supported on this browser (ex: Safari)
+        const mime = MediaRecorder.isTypeSupported('video/webm; codecs=vp8,opus') ? 'video/webm; codecs=vp8,opus' : 'video/webm'
+        const recorder = new MediaRecorder(stream, { mimeType: mime })
+        recorder.ondataavailable = async (e) => {
+          if (e.data.size > 0 && socket.readyState === WebSocket.OPEN) {
+            socket.send(await e.data.arrayBuffer())
+          }
+        }
+        recorder.start(1000)
+        setMediaRecorder(recorder)
+      }
+      
+      setWs(socket)
+    } catch (e) {
+      console.error('Erreur caméra:', e)
+      alert("Erreur d'accès à la caméra")
+    }
   }
 
-  useEffect(() => {
-    checkStream()
-  }, [])
+  function stopStream() {
+    if (mediaRecorder) mediaRecorder.stop()
+    if (ws) ws.close()
+    setStreaming(false)
+    if (videoRef.current && videoRef.current.srcObject) {
+      videoRef.current.srcObject.getTracks().forEach(t => t.stop())
+      videoRef.current.srcObject = null
+    }
+  }
 
-  return <section className="dashboard"><div className="dashboard-intro"><div><span className="eyebrow">Espace personnel</span><h1>Bienvenue,<br /><em>{user.email?.split('@')[0]}.</em></h1></div><button className="button button-quiet" type="button" onClick={onLogout}>Se déconnecter</button></div><div className="dashboard-grid"><article className="dashboard-card stream-card"><div className="card-heading"><div><span className="eyebrow">Accès sécurisé</span><h2>Votre stream</h2></div><span className="connection-badge"><i /> {error ? 'Hors ligne' : 'Connecté'}</span></div><div className="stream-preview"><PlayIcon /><span>Pledge edge stream</span></div><p>{error || stream?.message || 'Vérification de votre accès...'}</p><code>{stream?.stream_url || 'wss://edge-server-1/stream'}</code><button className="button button-primary" type="button" onClick={checkStream}>{loading ? 'Actualisation...' : 'Actualiser le statut'}</button></article><aside className="dashboard-card profile-card"><span className="avatar">{user.email?.charAt(0).toUpperCase()}</span><span className="eyebrow">Votre profil</span><h2>{user.email}</h2><dl><div><dt>Rôle</dt><dd>{user.role || 'viewer'}</dd></div><div><dt>Statut</dt><dd className="green">Actif</dd></div></dl></aside></div></section>
+  return (
+    <article className="dashboard-card stream-card">
+      <div className="card-heading">
+        <div><span className="eyebrow">Studio Edge</span><h2>Votre diffusion</h2></div>
+        <span className="connection-badge"><i style={{background: streaming ? '#22c55e' : '#ef4444'}} /> {streaming ? 'En ligne' : 'Hors ligne'}</span>
+      </div>
+      <video ref={videoRef} autoPlay muted style={{width: '100%', background: '#000', borderRadius: '12px', minHeight: '200px'}} />
+      <div style={{marginTop: '1rem'}}>
+        {streaming ? (
+          <button className="button button-quiet" onClick={stopStream}>Arrêter la diffusion</button>
+        ) : (
+          <button className="button button-primary" onClick={startStream}>Démarrer la caméra</button>
+        )}
+      </div>
+    </article>
+  )
+}
+
+function ViewerInterface({ user }) {
+  const [streamId, setStreamId] = useState('')
+  const [watching, setWatching] = useState(false)
+  const videoRef = useRef()
+  const [ws, setWs] = useState(null)
+  
+  function startWatching() {
+    if (!streamId) return
+    setWatching(true)
+    
+    const socket = new WebSocket(`ws://localhost:8000/api/stream/watch/${streamId}`)
+    socket.binaryType = "arraybuffer"
+    
+    const mediaSource = new MediaSource()
+    // Needs a slight delay for react to mount video ref if we just toggled watching
+    setTimeout(() => {
+      if (videoRef.current) {
+        videoRef.current.src = URL.createObjectURL(mediaSource)
+      }
+    }, 50)
+    
+    mediaSource.addEventListener('sourceopen', () => {
+      const mime = MediaRecorder.isTypeSupported('video/webm; codecs=vp8,opus') ? 'video/webm; codecs=vp8,opus' : 'video/webm'
+      const sourceBuffer = mediaSource.addSourceBuffer(mime)
+      const queue = []
+      
+      socket.onmessage = (event) => {
+        const chunk = new Uint8Array(event.data)
+        if (!sourceBuffer.updating && queue.length === 0) {
+          sourceBuffer.appendBuffer(chunk)
+        } else {
+          queue.push(chunk)
+        }
+      }
+      
+      sourceBuffer.addEventListener('updateend', () => {
+        if (queue.length > 0 && !sourceBuffer.updating) {
+          sourceBuffer.appendBuffer(queue.shift())
+        }
+      })
+    })
+    
+    socket.onclose = (e) => {
+      console.log('Connexion WSS fermée', e)
+      setWatching(false)
+    }
+    
+    setWs(socket)
+  }
+
+  function stopWatching() {
+    if (ws) ws.close()
+    setWatching(false)
+  }
+
+  return (
+    <article className="dashboard-card stream-card">
+      <div className="card-heading">
+        <div><span className="eyebrow">Lecteur Edge</span><h2>Regarder un flux</h2></div>
+      </div>
+      {!watching ? (
+        <div style={{display: 'flex', gap: '1rem', marginTop: '1rem'}}>
+          <input 
+            style={{flex: 1, padding: '0.8rem', borderRadius: '8px', border: '1px solid #333', background: '#111', color: '#fff'}}
+            placeholder="Email du diffuseur" 
+            value={streamId} 
+            onChange={e => setStreamId(e.target.value)} 
+          />
+          <button className="button button-primary" onClick={startWatching}>Rejoindre</button>
+        </div>
+      ) : (
+        <>
+          <video ref={videoRef} autoPlay controls style={{width: '100%', background: '#000', borderRadius: '12px', minHeight: '200px', marginTop: '1rem'}} />
+          <div style={{marginTop: '1rem'}}>
+            <button className="button button-quiet" onClick={stopWatching}>Arrêter de regarder</button>
+          </div>
+        </>
+      )}
+    </article>
+  )
+}
+
+function Dashboard({ user, onLogout }) {
+  return (
+    <section className="dashboard">
+      <div className="dashboard-intro">
+        <div><span className="eyebrow">Espace personnel</span><h1>Bienvenue,<br /><em>{user.email?.split('@')[0]}.</em></h1></div>
+        <button className="button button-quiet" type="button" onClick={onLogout}>Se déconnecter</button>
+      </div>
+      <div className="dashboard-grid">
+        {user.role === 'streamer' ? <StreamerInterface user={user} /> : <ViewerInterface user={user} />}
+        <aside className="dashboard-card profile-card">
+          <span className="avatar">{user.email?.charAt(0).toUpperCase()}</span>
+          <span className="eyebrow">Votre profil</span>
+          <h2>{user.email}</h2>
+          <dl>
+            <div><dt>Rôle</dt><dd>{user.role || 'viewer'}</dd></div>
+            <div><dt>Statut</dt><dd className="green">Actif</dd></div>
+          </dl>
+        </aside>
+      </div>
+    </section>
+  )
 }
 
 export default function App() {

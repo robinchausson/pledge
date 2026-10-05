@@ -10,14 +10,13 @@ import jwt
 try:
     from .models import get_db, User
     from . import schemas, security
+    from .stream_router import router as stream_router
+    from .mqtt_client import start_mqtt
 except ImportError:
     from models import get_db, User
     import schemas
     import security
-    
-try:
-    from .mqtt_client import start_mqtt
-except ImportError:
+    from stream_router import router as stream_router
     from mqtt_client import start_mqtt
 
 mqtt_client_instance = None
@@ -47,6 +46,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Inclusion du routeur de streaming
+app.include_router(stream_router)
 
 # --- 1. INSCRIPTION ---
 @app.post("/auth/register", response_model=schemas.UserOut)

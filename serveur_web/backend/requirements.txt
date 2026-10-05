@@ -5,3 +5,5 @@ passlib[bcrypt]
 PyJWT
 pydantic[email]
 paho-mqtt
+websockets
+httpx
