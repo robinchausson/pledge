@@ -130,6 +130,18 @@ function StreamerInterface({ user }) {
         setMediaRecorder(recorder)
       }
       
+      socket.onclose = (e) => {
+        console.log('Connexion WSS fermée', e)
+        setStreaming(false)
+        if (e.code !== 1000 && e.code !== 1005) {
+          alert(`La diffusion s'est arrêtée : ${e.reason || 'Erreur réseau'}`)
+        }
+        if (videoRef.current && videoRef.current.srcObject) {
+          videoRef.current.srcObject.getTracks().forEach(t => t.stop())
+          videoRef.current.srcObject = null
+        }
+      }
+      
       setWs(socket)
     } catch (e) {
       console.error('Erreur caméra:', e)
@@ -273,6 +285,12 @@ function Dashboard({ user, onLogout }) {
 export default function App() {
   const [authMode, setAuthMode] = useState(null)
   const [user, setUser] = useState(null)
+
+  useEffect(() => {
+    apiRequest('/auth/me')
+      .then(data => { if (data.user) setUser(data.user) })
+      .catch(() => {}) // Ignore errors if not logged in
+  }, [])
 
   async function logout() { try { await apiRequest('/auth/logout', { method: 'POST' }) } finally { setUser(null) } }
 

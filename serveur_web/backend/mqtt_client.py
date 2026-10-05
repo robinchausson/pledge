@@ -3,7 +3,10 @@ import json
 import os
 import datetime
 from sqlalchemy.orm import Session
-from .models import SessionLocal, EdgeNode, DataLocation
+try:
+    from .models import SessionLocal, EdgeNode, DataLocation
+except ImportError:
+    from models import SessionLocal, EdgeNode, DataLocation
 
 # On récupère le broker par défaut ou via variable d'environnement
 BROKER_IP = os.getenv("BROKER_IP", "10.4.19.234")

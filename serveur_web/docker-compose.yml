@@ -8,11 +8,12 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - BROKER_IP=10.4.19.234
+      - BROKER_IP=host.docker.internal
       - BROKER_PORT=1883
-      # Adaptez ces IP avec celles de vos serveurs crypto de zone
-      - CRYPTO_URL_ZONE_1=https://10.4.19.234:8443
-      - CRYPTO_URL_ZONE_2=https://10.4.19.235:8443
+      # Le serveur crypto dockerisé utilise TOUJOURS le HTTPS grâce à son entrypoint !
+      - CRYPTO_URL_ZONE_1=https://host.docker.internal:8443
+    volumes:
+      - ./backend/data:/app/data
 
   frontend:
     build: ./frontend

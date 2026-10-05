@@ -4,7 +4,10 @@ import websockets
 import httpx
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
 from sqlalchemy.orm import Session
-from .models import get_db, EdgeNode
+try:
+    from .models import get_db, EdgeNode, DataLocation
+except ImportError:
+    from models import get_db, EdgeNode, DataLocation
 import os
 
 router = APIRouter()
@@ -91,7 +94,6 @@ async def publish_stream(websocket: WebSocket, client_id: str, db: Session = Dep
         except:
             pass
 
-from .models import DataLocation
 
 async def verify_crypto_integrity(fragment_b64: str, zone_id: str, expected_v_matrix: list) -> bool:
     crypto_url = CRYPTO_SERVERS.get(zone_id)

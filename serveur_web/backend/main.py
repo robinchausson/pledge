@@ -92,6 +92,11 @@ def logout(response: Response):
     response.delete_cookie(key="refresh_token")
     return {"message": "Déconnexion réussie"}
 
+# --- 4. RÉCUPÉRER L'UTILISATEUR CONNECTÉ ---
+@app.get("/auth/me")
+def get_me(current_user: User = Depends(get_current_user)):
+    return {"user": {"email": current_user.email, "role": current_user.role}}
+
 
 # --- MIDDLEWARE & PROTECTION DES ROUTES ---
 def get_current_user(request: Request, db: Session = Depends(get_db)):

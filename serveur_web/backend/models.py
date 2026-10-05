@@ -1,8 +1,10 @@
 from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
+import os
 import datetime
 
-SQLALCHEMY_DATABASE_URL = "sqlite:///./app.db" # Base de données locale pour le développement
+os.makedirs("./data", exist_ok=True)
+SQLALCHEMY_DATABASE_URL = "sqlite:///./data/app.db" # Base de données locale pour le développement
 engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()

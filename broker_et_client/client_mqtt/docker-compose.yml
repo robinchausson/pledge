@@ -6,11 +6,13 @@ services:
     container_name: client_mqtt_edge
     restart: always
     ports:
-      - "8443:8443" 
+      - "8444:8444"
     environment:
-      - BROKER_IP=10.4.19.234 
+      - BROKER_IP=host.docker.internal
       - BROKER_PORT=1883
-      - NODE_ID=PC_Julian
+      - NODE_ID=Local_Edge_Node
       - ZONE_ID=Zone_1
+      - PORT_WSS=8444
+      - NODE_IP=host.docker.internal
     volumes:
       - /:/host_root:ro
