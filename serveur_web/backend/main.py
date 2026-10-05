@@ -8,23 +8,47 @@ import jwt
 
 # Importations compatibles avec `uvicorn backend.main:app` et `uvicorn main:app`.
 try:
-    from .models import get_db, User
+    from .models import get_db, User, SessionLocal, EdgeNode, DataLocation
     from . import schemas, security
     from .stream_router import router as stream_router
     from .mqtt_client import start_mqtt
 except ImportError:
-    from models import get_db, User
+    from models import get_db, User, SessionLocal, EdgeNode, DataLocation
     import schemas
     import security
     from stream_router import router as stream_router
     from mqtt_client import start_mqtt
 
 mqtt_client_instance = None
+import docker
+
+try:
+    docker_client = docker.from_env()
+except Exception as e:
+    print(f"API Docker locale indisponible : {e}")
+    docker_client = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global mqtt_client_instance
     mqtt_client_instance = start_mqtt()
+    
+    # Création ou mise à jour du compte administrateur
+    db = SessionLocal()
+    try:
+        admin = db.query(User).filter(User.email == "admin@admin.com").first()
+        hashed_pwd = security.get_password_hash("Azerty123")
+        if not admin:
+            admin = User(email="admin@admin.com", hashed_password=hashed_pwd, role="admin")
+            db.add(admin)
+        else:
+            admin.hashed_password = hashed_pwd
+        db.commit()
+    except Exception as e:
+        print(f"Erreur init admin: {e}")
+    finally:
+        db.close()
+        
     yield
     if mqtt_client_instance:
         mqtt_client_instance.loop_stop()
@@ -133,6 +157,70 @@ def get_stream_status(current_user: User = Depends(get_current_user)):
         "role": current_user.role,
         "stream_url": "wss://edge-server-1/stream"
     }
+
+# --- 5. ADMINISTRATION ---
+@app.get("/api/admin/containers")
+def get_docker_containers(current_user: User = Depends(get_current_user)):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Accès refusé")
+    
+    if not docker_client:
+        return {"error": "API Docker indisponible sur le serveur"}
+    
+    containers = []
+    try:
+        for c in docker_client.containers.list(all=True):
+            containers.append({
+                "id": c.short_id,
+                "name": c.name,
+                "status": c.status,
+                "image": c.attrs.get('Config', {}).get('Image', 'unknown')
+            })
+        return containers
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/api/admin/containers/{container_name}/logs")
+def get_container_logs(container_name: str, current_user: User = Depends(get_current_user)):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Accès refusé")
+    
+    if not docker_client:
+        return {"error": "API Docker indisponible"}
+        
+    try:
+        container = docker_client.containers.get(container_name)
+        logs = container.logs(tail=200).decode("utf-8")
+        return {"logs": logs}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/api/admin/nodes")
+def get_edge_nodes(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Accès refusé")
+    
+    nodes = db.query(EdgeNode).all()
+    zones = {}
+    for node in nodes:
+        if node.zone_id not in zones:
+            zones[node.zone_id] = []
+        zones[node.zone_id].append({
+            "node_id": node.node_id,
+            "ip_address": node.ip_address,
+            "wss_port": node.wss_port,
+            "storage_available_gb": node.storage_available_gb,
+            "cpu_usage_pct": node.cpu_usage_pct,
+            "last_seen": node.last_seen.isoformat() if node.last_seen else None
+        })
+    return {"zones": zones}
+
+@app.get("/api/streams/active")
+def get_active_streams(db: Session = Depends(get_db)):
+    locations = db.query(DataLocation).all()
+    # On récupère les emails des diffuseurs de manière unique
+    streams = list(set([loc.client_id for loc in locations]))
+    return {"streams": streams}
 
 @app.get("/")
 def read_root():

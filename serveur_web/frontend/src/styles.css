@@ -661,7 +661,7 @@ h2 em {
 }
 
 .dashboard {
-  padding: 70px 0 110px;
+  padding: 20px 0 110px;
 }
 
 .dashboard-intro {
@@ -679,7 +679,7 @@ h2 em {
   display: grid;
   gap: 18px;
   grid-template-columns: 1.35fr .65fr;
-  margin-top: 44px;
+  margin-top: 10px;
 }
 
 .dashboard-card {
