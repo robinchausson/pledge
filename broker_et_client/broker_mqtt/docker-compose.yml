@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  broker_mqtt:
+    image: eclipse-mosquitto:latest
+    container_name: broker_zone
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - mosquitto_data:/mosquitto/data
+
+volumes:
+  mosquitto_data:

@@ -1,0 +1,14 @@
+services:
+  crypto-node:
+    build: .
+    image: streamfog-crypto-node:latest
+    container_name: crypto_node_zone_alpha
+    restart: unless-stopped
+    ports:
+      - "8443:8443"
+    environment:
+      CRYPTO_SECRET_SCALAR: ${CRYPTO_SECRET_SCALAR:-}
+      TLS_CERT_FILE: /certs/tls.crt
+      TLS_KEY_FILE: /certs/tls.key
+    volumes:
+      - ./certs:/certs

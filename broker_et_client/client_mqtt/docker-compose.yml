@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  client_telemetrie:
+    build: .
+    container_name: client_mqtt_edge
+    restart: always
+    ports:
+      - "8443:8443" 
+    environment:
+      - BROKER_IP=10.4.19.234 
+      - BROKER_PORT=1883
+      - NODE_ID=PC_Julian
+      - ZONE_ID=Zone_1
+    volumes:
+      - /:/host_root:ro

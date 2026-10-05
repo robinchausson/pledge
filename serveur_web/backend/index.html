@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="fr">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pledge | Stream Beyond</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 40px;
+            background-color: #f4f4f9;
+        }
+
+        .container {
+            max-width: 600px;
+            margin: auto;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        h1 {
+            text-align: center;
+            color: #333;
+        }
+
+        .group {
+            margin-bottom: 20px;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 15px;
+            cursor: pointer;
+            border-radius: 4px;
+            margin-right: 10px;
+        }
+
+        button:hover {
+            background-color: #0056b3;
+        }
+
+        .output {
+            background: #222;
+            color: #0f0;
+            padding: 10px;
+            border-radius: 5px;
+            font-family: monospace;
+            white-space: pre-wrap;
+            min-height: 50px;
+        }
+
+        input {
+            padding: 8px;
+            margin-right: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>Testeur d'API (Backend)</h1>
+
+        <div class="group">
+            <h3>1. Inscription / Connexion</h3>
+            <input type="email" id="email" placeholder="Email" value="test@smart.home">
+            <input type="password" id="password" placeholder="Mot de passe" value="secret123">
+            <select id="role" style="padding: 8px; border: 1px solid #ccc; border-radius: 4px;">
+                <option value="viewer">Viewer (Spectateur)</option>
+                <option value="diffuseur">Diffuseur (Streamer)</option>
+            </select>
+            <br><br>
+            <button onclick="register()">S'inscrire</button>
+            <button onclick="login()">Se Connecter</button>
+        </div>
+
+        <div class="group">
+            <h3>2. Actions Sécurisées (Nécessite le Cookie)</h3>
+            <button onclick="testStream()">Tester accès protégé (/api/stream/status)</button>
+            <button style="background-color: #dc3545;" onclick="logout()">Se Déconnecter</button>
+        </div>
+
+        <h3>Console de résultat :</h3>
+        <div id="output" class="output">En attente d'une action...</div>
+    </div>
+
+    <script>
+        function log(data) {
+            document.getElementById('output').textContent = JSON.stringify(data, null, 2);
+        }
+
+        function getRegisterData() {
+            return {
+                email: document.getElementById('email').value,
+                password: document.getElementById('password').value,
+                role: document.getElementById('role').value
+            };
+        }
+
+        function getLoginData() {
+            return {
+                email: document.getElementById('email').value,
+                password: document.getElementById('password').value
+            };
+        }
+
+        async function register() {
+            const res = await fetch('/auth/register', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(getRegisterData())
+            });
+            const data = await res.json();
+            log(data);
+        }
+
+        async function login() {
+            const res = await fetch('/auth/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(getLoginData())
+            });
+            const data = await res.json();
+            log(data);
+            if (res.ok) alert("Connecté ! Les cookies ont été reçus (visibles dans l'onglet Application du navigateur).");
+        }
+
+        async function testStream() {
+            const res = await fetch('/api/stream/status'); // Pas besoin d'envoyer le token, le navigateur envoie le cookie auto !
+            const data = await res.json();
+            log(data);
+        }
+
+        async function logout() {
+            const res = await fetch('/auth/logout', { method: 'POST' });
+            const data = await res.json();
+            log(data);
+        }
+    </script>
+</body>
+
+</html>

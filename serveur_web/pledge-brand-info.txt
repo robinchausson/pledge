@@ -1,0 +1,94 @@
+PLE​​DGE - FICHE DE MARQUE
+==========================
+
+Source
+------
+Planche de marque fournie : Pledge Stream Beyond Logo.png
+
+Nom de marque
+-------------
+Pledge
+
+Slogan
+------
+STREAM BEYOND
+
+Concept
+-------
+Pledge = Play + Edge
+
+- Play : le symbole universel du streaming.
+- Edge : l'idee de la limite, du next level, de l'avant.
+- Pledge est un service de streaming sans limites.
+- Play + Edge = une plateforme qui emmene toujours plus loin,
+  au-dela des contenus preferes.
+
+Typographie
+-----------
+Famille : Poppins (Google Fonts)
+Exemples visibles sur la planche :
+- Titres : Bold
+- Sous-titres : Medium
+- Texte : Regular
+
+Caracteres de demonstration visibles :
+ABCDEFGHIJKLMNOPQRSTUVWXYZ
+abcdefghijklmnopqrstuvwxyz
+0123456789
+
+Source officielle de telechargement :
+https://fonts.google.com/specimen/Poppins
+https://github.com/google/fonts/tree/main/ofl/poppins
+
+Couleurs
+--------
+- Bleu principal : #3882F6
+  Connotation : technologie, avenir.
+- Indigo : #6366F1
+  Connotation : creativite, immersion, emotion.
+- Bleu nuit : #0B0F1A
+  Connotation : elegance, serenite, focus.
+- Gris clair : #E5E7EB
+  Connotation : lisibilite, equilibre, contraste.
+- Gris fonce : #687280
+  Connotation : secondaire, interface, textes.
+
+Logo et variations
+------------------
+- Logo principal : symbole P multicolore bleu/indigo/violet, mot Pledge,
+  slogan STREAM BEYOND.
+- Variation horizontale avec symbole et mot Pledge.
+- Variation symbole seul dans un carre a coins arrondis.
+- Icone d'application : symbole P dans un carre a coins arrondis.
+
+Utilisation sur fonds
+---------------------
+- Fond sombre : version recommandee.
+- Fond clair : version claire.
+- Version monochrome : pour les usages necessitant une seule couleur.
+
+Univers visuel
+--------------
+- Ecrans de streaming et salle de visionnage.
+- Motifs de vagues lumineuses bleues et indigo.
+- Paysages montagneux.
+- Appareils et interfaces de streaming.
+- Atmosphere nocturne, technologique et immersive.
+- Icones de lecture, ecran, mobile et manette.
+
+Exemple d'interface
+-------------------
+- Navigation : Accueil, Films, Series, Ma liste.
+- Recherche disponible.
+- Message d'accueil : Vos histoires preferees, sans limites.
+- Bouton principal : Decouvrir.
+- Application mobile : Vos heures, bouton Se connecter, bouton Creer un compte.
+
+Telechargement local
+--------------------
+Le dossier reserve aux fichiers de police est :
+fonts/Poppins/
+
+Note : la famille Poppins est distribuee sous licence SIL Open Font License.
+Verifier les conditions de la licence aupres de Google Fonts avant une
+redistribution commerciale.

@@ -1,0 +1,25 @@
+# Certificats TLS générés localement
+streamer-agent/certs/*.key
+streamer-agent/certs/*.crt
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+venv/
+.venv/
+
+# Environnement et secrets
+.env
+.env.*
+*.log
+
+# Éditeurs et système
+.vscode/*
+!.vscode/settings.json
+.idea/
+.DS_Store
+Thumbs.db

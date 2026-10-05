@@ -1,0 +1,4 @@
+fastapi
+numpy
+py_ecc
+uvicorn[standard]
