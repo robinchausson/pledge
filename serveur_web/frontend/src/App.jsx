@@ -53,10 +53,16 @@ function AuthDialog({ mode, setMode, onSuccess, onClose }) {
     setLoading(true)
     try {
       const payload = isRegister ? form : { email: form.email, password: form.password }
-      const data = await apiRequest(isRegister ? '/auth/register' : '/auth/login', {
+      let data = await apiRequest(isRegister ? '/auth/register' : '/auth/login', {
         method: 'POST',
         body: JSON.stringify(payload),
       })
+      if (isRegister) {
+        data = await apiRequest('/auth/login', {
+          method: 'POST',
+          body: JSON.stringify({ email: form.email, password: form.password }),
+        })
+      }
       onSuccess(data.user || form)
     } catch (requestError) {
       setError(requestError.message)

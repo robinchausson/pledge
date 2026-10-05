@@ -21,20 +21,20 @@ CRYPTO_SERVERS = {
 async def get_crypto_signature(fragment_bytes: bytes, zone_id: str) -> dict:
     crypto_url = CRYPTO_SERVERS.get(zone_id)
     if not crypto_url:
-        print(f"[{zone_id}] Aucun serveur crypto configuré.")
+        print(f"[{zone_id}] Aucun serveur crypto configuré.", flush=True)
         return {}
 
     fragment_b64 = base64.b64encode(fragment_bytes).decode("utf-8")
     payload = {"fragment_data": fragment_b64, "paramA": 42}
     
     # verify=False est nécessaire en dev avec le certificat autosigné du crypto node
-    async with httpx.AsyncClient(verify=False) as client:
+    async with httpx.AsyncClient(verify=False, timeout=30.0) as client:
         try:
-            response = await client.post(f"{crypto_url}/api/v1/crypto/signature", json=payload, timeout=5.0)
+            response = await client.post(f"{crypto_url}/api/v1/crypto/signature", json=payload)
             response.raise_for_status()
             return response.json()
         except Exception as e:
-            print(f"Erreur appel Crypto Node {zone_id} ({crypto_url}): {e}")
+            print(f"Erreur appel Crypto Node {zone_id} ({crypto_url}): {e}", flush=True)
             return {}
 
 @router.websocket("/api/stream/publish/{client_id}")
@@ -68,6 +68,7 @@ async def publish_stream(websocket: WebSocket, client_id: str, db: Session = Dep
                     
                     # Interroger le serveur crypto de la zone pour signer le fragment
                     crypto_data = await get_crypto_signature(chunk, target_node.zone_id)
+                    print(f"[DEBUG] get_crypto_signature a retourné : {list(crypto_data.keys())}", flush=True)
                     
                     # Construire le payload contenant les données brutes + signature
                     payload_to_store = {
@@ -103,14 +104,18 @@ async def verify_crypto_integrity(fragment_b64: str, zone_id: str, expected_v_ma
         
     payload = {"fragment_data": fragment_b64, "paramA": 42}
     
-    async with httpx.AsyncClient(verify=False) as client:
+    async with httpx.AsyncClient(verify=False, timeout=30.0) as client:
         try:
-            response = await client.post(f"{crypto_url}/api/v1/crypto/integrity", json=payload, timeout=5.0)
+            response = await client.post(f"{crypto_url}/api/v1/crypto/integrity", json=payload)
             response.raise_for_status()
             data = response.json()
-            return data.get("V_matrix") == expected_v_matrix
+            actual_v_matrix = data.get("V_matrix")
+            if actual_v_matrix != expected_v_matrix:
+                print(f"[DEBUG] V_matrix diffèrent ! Attendu ({len(expected_v_matrix) if expected_v_matrix else 0}) vs Reçu ({len(actual_v_matrix) if actual_v_matrix else 0})", flush=True)
+                return False
+            return True
         except Exception as e:
-            print(f"Erreur vérification intégrité {zone_id}: {e}")
+            print(f"Erreur vérification intégrité {zone_id}: {e}", flush=True)
             return False
 
 @router.websocket("/api/stream/watch/{client_id}")
