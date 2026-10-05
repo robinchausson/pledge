@@ -56,17 +56,16 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Smart Home Edge API", lifespan=lifespan)
 
-# Configuration CORS pour autoriser le futur frontend React à communiquer avec l'API
 origins = [
-    "http://localhost:5173", # Port par défaut de Vite (React)
+    "http://localhost:5173",
     "http://127.0.0.1:5173",
-    "http://localhost:3000", # Port par défaut de Create React App
 ]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
-    allow_credentials=True, # Très important pour accepter les cookies
+    allow_origin_regex=r"http://100\.\d+\.\d+\.\d+(:5173)?", # Autorise les IPs Tailscale
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )

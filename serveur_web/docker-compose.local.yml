@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  backend:
+    build: ./backend
+    container_name: pledge_backend
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - BROKER_IP=host.docker.internal
+      - BROKER_PORT=1883
+      # Le serveur crypto dockerisé utilise TOUJOURS le HTTPS grâce à son entrypoint !
+      - CRYPTO_URL_ZONE_1=https://host.docker.internal:8443
+    volumes:
+      - ./backend/data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  frontend:
+    build: ./frontend
+    container_name: pledge_frontend
+    restart: always
+    ports:
+      - "5173:5173"
+    environment:
+      # L'URL du backend vue depuis le navigateur de l'utilisateur
+      - VITE_API_URL=http://localhost:8000
