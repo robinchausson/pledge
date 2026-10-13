@@ -13,6 +13,7 @@ services:
       - EDGE_WS_SCHEME=ws
       - BROKER_HOST=host.docker.internal
       - BROKER_PORT=1883
+      - CRYPTO_URL=https://host.docker.internal:8443
       - EDGE_DATA_DIR=/donnees_isolees
       - TELEMETRY_INTERVAL_SEC=5
     volumes:

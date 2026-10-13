@@ -171,9 +171,8 @@ function StreamerInterface({ user }) {
       setEdgeNode(alloc.edge_node_id)
 
       // 2. Plan de Données Décentralisé : Connexion WebSocket DIRECTE au nœud Fog (Phase 4)
-      const edgeHost = (alloc.edge_host === '127.0.0.1' || alloc.edge_host === 'localhost')
-        ? window.location.hostname
-        : alloc.edge_host
+      const isLocalHost = !alloc.edge_host || alloc.edge_host === '127.0.0.1' || alloc.edge_host === 'localhost' || alloc.edge_host === 'host.docker.internal'
+      const edgeHost = isLocalHost ? window.location.hostname : alloc.edge_host
       const directUploadUrl = `${alloc.scheme || 'ws'}://${edgeHost}:${alloc.edge_port}/upload/${encodeURIComponent(user.email)}`
       console.log(`[Streamer] Connexion directe Edge P2P : ${directUploadUrl}`)
 
@@ -220,7 +219,7 @@ function StreamerInterface({ user }) {
           }
         }
 
-        recorder.start(600)
+        recorder.start(1000)
         setMediaRecorder(recorder)
 
         // Heartbeat périodique vers le backend pour maintenir le statut en direct
@@ -304,7 +303,6 @@ function StreamerInterface({ user }) {
 function ViewerInterface({ user }) {
   const [streamId, setStreamId] = useState('')
   const [watching, setWatching] = useState(false)
-  const [watchMode, setWatchMode] = useState('live')
   const [quality, setQuality] = useState('1080p')
   const [chunksReceived, setChunksReceived] = useState(0)
   const [connectedNode, setConnectedNode] = useState(null)
@@ -332,7 +330,7 @@ function ViewerInterface({ user }) {
     simulateTamperRef.current = nextVal
   }
 
-  async function startWatching(idToWatch, mode = watchMode, q = quality) {
+  async function startWatching(idToWatch, q = quality) {
     const targetId = idToWatch || streamId
     if (!targetId) return
 
@@ -344,7 +342,6 @@ function ViewerInterface({ user }) {
     }
 
     setStreamId(targetId)
-    setWatchMode(mode)
     setQuality(q)
     setWatching(true)
     setChunksReceived(0)
@@ -360,17 +357,16 @@ function ViewerInterface({ user }) {
 
     try {
       // 1. Plan d'Annuaire : Découverte du nœud hôte via le backend central
-      const discovery = await apiRequest(`/api/stream/discover/${encodeURIComponent(targetId)}?mode=${mode}&quality=${q}`)
+      const discovery = await apiRequest(`/api/stream/discover/${encodeURIComponent(targetId)}?mode=start&quality=${q}`)
       setConnectedNode(discovery.edge_node_id)
 
       // Clé publique de zone par défaut
       const defaultZonePk = deriveStreamerKey(targetId).zonePk
 
       // 2. Plan de Données Décentralisé : Connexion directe au nœud Edge (Phase 4)
-      const edgeHost = (discovery.edge_host === '127.0.0.1' || discovery.edge_host === 'localhost')
-        ? window.location.hostname
-        : discovery.edge_host
-      const directDownloadUrl = `${discovery.scheme || 'ws'}://${edgeHost}:${discovery.edge_port}/download/${encodeURIComponent(targetId)}?mode=${mode}&quality=${q}`
+      const isLocalHost = !discovery.edge_host || discovery.edge_host === '127.0.0.1' || discovery.edge_host === 'localhost' || discovery.edge_host === 'host.docker.internal'
+      const edgeHost = isLocalHost ? window.location.hostname : discovery.edge_host
+      const directDownloadUrl = `${discovery.scheme || 'ws'}://${edgeHost}:${discovery.edge_port}/download/${encodeURIComponent(targetId)}?mode=start&quality=${q}`
       console.log(`[Viewer] Visionnage direct Edge P2P (Qualité: ${q}) : ${directDownloadUrl}`)
 
       const socket = new WebSocket(directDownloadUrl)
@@ -388,23 +384,107 @@ function ViewerInterface({ user }) {
         let sourceBuffer
         try {
           sourceBuffer = mediaSource.addSourceBuffer(mime)
+          // Utilisation du mode par défaut 'segments' pour respecter l'horodatage natif multitrack VP8 + Opus
         } catch (err) {
           console.error("Erreur addSourceBuffer:", err)
           return
         }
 
         const queue = []
+        let retryTimeout = null
+        let appendRetryCount = 0
 
         function processQueue() {
-          if (queue.length > 0 && sourceBuffer && !sourceBuffer.updating) {
-            const next = queue.shift()
-            try {
-              sourceBuffer.appendBuffer(next)
-            } catch (e) {
-              console.warn("Erreur buffer append:", e)
+          if (!sourceBuffer || sourceBuffer.updating || queue.length === 0) {
+            return
+          }
+          if (mediaSource.readyState !== 'open') {
+            return
+          }
+
+          const next = queue.shift()
+          try {
+            sourceBuffer.appendBuffer(next)
+            appendRetryCount = 0
+          } catch (e) {
+            console.warn("[Viewer MSE] Erreur appendBuffer:", e)
+            appendRetryCount++
+            if (appendRetryCount < 3) {
+              queue.unshift(next)
+              if (!retryTimeout) {
+                retryTimeout = setTimeout(() => {
+                  retryTimeout = null
+                  processQueue()
+                }, 50)
+              }
+            } else {
+              console.error("[Viewer MSE] Bloc ignoré après 2 échecs pour éviter le blocage de la file")
+              appendRetryCount = 0
+              if (!retryTimeout) {
+                retryTimeout = setTimeout(() => {
+                  retryTimeout = null
+                  processQueue()
+                }, 20)
+              }
             }
           }
         }
+
+        // Contrôleur de saut automatique des micro-trous de buffer (Gap Controller)
+        const handleGapNudge = () => {
+          if (!videoRef.current || !sourceBuffer) return
+          try {
+            const cur = videoRef.current.currentTime
+            const bufs = sourceBuffer.buffered
+            for (let i = 0; i < bufs.length; i++) {
+              const bStart = bufs.start(i)
+              const bEnd = bufs.end(i)
+              if (cur < bStart && (bStart - cur) < 0.6) {
+                console.log(`[Viewer Gap Jump] Saut de micro-trou : ${cur} -> ${bStart + 0.03}`)
+                videoRef.current.currentTime = bStart + 0.03
+                videoRef.current.play().catch(() => {})
+                return
+              }
+              if (Math.abs(cur - bEnd) < 0.25 && i + 1 < bufs.length) {
+                const nextStart = bufs.start(i + 1)
+                console.log(`[Viewer Gap Jump] Saut vers segment suivant : ${cur} -> ${nextStart + 0.03}`)
+                videoRef.current.currentTime = nextStart + 0.03
+                videoRef.current.play().catch(() => {})
+                return
+              }
+            }
+          } catch (_) {}
+        }
+
+        if (videoRef.current) {
+          videoRef.current.addEventListener('waiting', handleGapNudge)
+          videoRef.current.addEventListener('stalled', handleGapNudge)
+        }
+
+        sourceBuffer.addEventListener('updateend', () => {
+          processQueue()
+
+          if (videoRef.current) {
+            try {
+              if (sourceBuffer.buffered.length > 0) {
+                const bufferStart = sourceBuffer.buffered.start(0)
+                if (videoRef.current.currentTime < bufferStart) {
+                  videoRef.current.currentTime = bufferStart
+                }
+              }
+
+              handleGapNudge()
+
+              if (auditStatus !== 'tampered') {
+                videoRef.current.play().catch(() => {})
+              }
+            } catch (_) {}
+          }
+        })
+
+        sourceBuffer.addEventListener('error', (e) => {
+          console.error("[Viewer MSE] SourceBuffer error event:", e)
+        })
 
         socket.onmessage = async (event) => {
           let chunk = null
@@ -414,8 +494,9 @@ function ViewerInterface({ user }) {
           if (typeof event.data === 'string') {
             try {
               packet = JSON.parse(event.data)
-              if (packet && packet.payload_b64) {
-                chunk = base64ToUint8Array(packet.payload_b64)
+              const b64 = packet?.payload_b64 || packet?.chunk_b64
+              if (b64) {
+                chunk = base64ToUint8Array(b64)
               }
             } catch (_) {}
           } else if (event.data instanceof ArrayBuffer) {
@@ -423,8 +504,9 @@ function ViewerInterface({ user }) {
               const text = new TextDecoder().decode(event.data)
               if (text.trim().startsWith('{')) {
                 packet = JSON.parse(text)
-                if (packet && packet.payload_b64) {
-                  chunk = base64ToUint8Array(packet.payload_b64)
+                const b64 = packet?.payload_b64 || packet?.chunk_b64
+                if (b64) {
+                  chunk = base64ToUint8Array(b64)
                 }
               }
             } catch (_) {}
@@ -479,17 +561,8 @@ function ViewerInterface({ user }) {
           }
 
           setChunksReceived(c => c + 1)
-          if (sourceBuffer && !sourceBuffer.updating && queue.length === 0) {
-            try {
-              sourceBuffer.appendBuffer(chunk)
-            } catch (e) {
-              queue.push(chunk)
-            }
-          } else {
-            if (queue.length < 50) {
-              queue.push(chunk)
-            }
-          }
+          queue.push(chunk)
+          processQueue()
 
           if (videoRef.current && videoRef.current.paused && auditStatus !== 'tampered') {
             videoRef.current.play().catch(() => {
@@ -500,32 +573,6 @@ function ViewerInterface({ user }) {
             })
           }
         }
-
-        sourceBuffer.addEventListener('updateend', () => {
-          processQueue()
-
-          if (videoRef.current) {
-            if (mode === 'live' && sourceBuffer.buffered.length > 0) {
-              const livePosition = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1)
-              if (livePosition - videoRef.current.currentTime > 1.4) {
-                videoRef.current.currentTime = Math.max(0, livePosition - 0.3)
-              }
-            }
-
-            if (sourceBuffer.buffered.length > 0 && !sourceBuffer.updating) {
-              const bufferStart = sourceBuffer.buffered.start(0)
-              if (videoRef.current.currentTime - bufferStart > 60) {
-                try {
-                  sourceBuffer.remove(bufferStart, videoRef.current.currentTime - 30)
-                } catch (_) {}
-              }
-            }
-
-            if (videoRef.current.paused && auditStatus !== 'tampered') {
-              videoRef.current.play().catch(() => {})
-            }
-          }
-        })
       })
 
       socket.onclose = (e) => {
@@ -543,6 +590,9 @@ function ViewerInterface({ user }) {
 
   function stopWatching() {
     if (ws) ws.close()
+    if (videoRef.current) {
+      videoRef.current.src = ''
+    }
     setWatching(false)
     setAuditStatus('idle')
   }
@@ -564,8 +614,8 @@ function ViewerInterface({ user }) {
               </span>
             )}
             <span className="connection-badge">
-              <i style={{background: watchMode === 'live' ? '#22c55e' : '#3b82f6'}} />
-              {watchMode === 'live' ? `Direct (${chunksReceived} blocs)` : `Replay (${chunksReceived} blocs)`}
+              <i style={{background: '#22c55e'}} />
+              {`En direct (${chunksReceived} blocs)`}
             </span>
           </div>
         )}
@@ -573,26 +623,6 @@ function ViewerInterface({ user }) {
 
       {!watching ? (
         <div style={{marginTop: '1rem'}}>
-          <div style={{display: 'flex', gap: '0.6rem', marginBottom: '0.8rem', alignItems: 'center'}}>
-            <span style={{fontSize: '13px', color: '#8899b8', fontWeight: 500}}>Option de démarrage :</span>
-            <button
-              type="button"
-              className={`button ${watchMode === 'live' ? 'button-primary' : 'button-quiet'}`}
-              style={{padding: '5px 12px', fontSize: '12px'}}
-              onClick={() => setWatchMode('live')}
-            >
-              🔴 En direct
-            </button>
-            <button
-              type="button"
-              className={`button ${watchMode === 'start' ? 'button-primary' : 'button-quiet'}`}
-              style={{padding: '5px 12px', fontSize: '12px'}}
-              onClick={() => setWatchMode('start')}
-            >
-              ⏮ Depuis le début
-            </button>
-          </div>
-
           <div style={{display: 'flex', gap: '0.6rem', marginBottom: '1.2rem', alignItems: 'center'}}>
             <span style={{fontSize: '13px', color: '#8899b8', fontWeight: 500}}>Résolution / Qualité :</span>
             <button
@@ -614,11 +644,11 @@ function ViewerInterface({ user }) {
           </div>
 
           <h3 style={{marginBottom: '1rem', fontSize: '14px'}}>Flux en direct disponibles</h3>
-          <ActiveStreamsList onSelectStream={(s) => { setStreamId(s); startWatching(s, watchMode, quality) }} />
+          <ActiveStreamsList onSelectStream={(s) => { setStreamId(s); startWatching(s, quality) }} />
         </div>
       ) : (
         <>
-          <video ref={videoRef} autoPlay controls playsInline style={{width: '100%', background: '#000', borderRadius: '12px', minHeight: '200px', marginTop: '1rem'}} />
+          <video ref={videoRef} autoPlay muted controls playsInline style={{width: '100%', background: '#000', borderRadius: '12px', minHeight: '200px', marginTop: '1rem'}} />
 
           {/* TABLEAU DE BORD D'INTÉGRITÉ EN DIRECT (PHASE 5) */}
           <section className="integrity-dashboard">
@@ -722,37 +752,20 @@ function ViewerInterface({ user }) {
 
           <div style={{marginTop: '1rem', display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center'}}>
             <button className="button button-quiet" onClick={stopWatching}>Arrêter de regarder</button>
-            {watchMode === 'live' ? (
-              <button
-                className="button button-quiet"
-                title="Reprendre le flux depuis le tout premier bloc enregistré"
-                onClick={() => startWatching(streamId, 'start', quality)}
-              >
-                ⏮ Revoir depuis le début
-              </button>
-            ) : (
-              <button
-                className="button button-primary"
-                title="Sauter directement au flux en direct temps réel"
-                onClick={() => startWatching(streamId, 'live', quality)}
-              >
-                🔴 Rejoindre le direct
-              </button>
-            )}
 
             <div style={{display: 'flex', gap: '6px', marginLeft: 'auto', alignItems: 'center'}}>
-              <span style={{fontSize: '11px', color: '#8899b8'}}>Qualité :</span>
+              <span style={{fontSize: '11px', color: '#8899b8'}}>Qualité active :</span>
               <button
                 className={`button ${quality === '1080p' ? 'button-primary' : 'button-quiet'}`}
                 style={{padding: '4px 8px', fontSize: '11px'}}
-                onClick={() => startWatching(streamId, watchMode, '1080p')}
+                onClick={() => startWatching(streamId, '1080p')}
               >
                 1080p
               </button>
               <button
                 className={`button ${quality === '720p' ? 'button-primary' : 'button-quiet'}`}
                 style={{padding: '4px 8px', fontSize: '11px'}}
-                onClick={() => startWatching(streamId, watchMode, '720p')}
+                onClick={() => startWatching(streamId, '720p')}
               >
                 ⚡ 720p Fog
               </button>

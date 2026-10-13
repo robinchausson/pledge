@@ -274,13 +274,21 @@ def stream_heartbeat(session_id: str, db: Session = Depends(get_db)):
 
 @router.post("/api/stream/stop/{session_id}")
 def stop_stream_session(session_id: str, db: Session = Depends(get_db)):
-    """Marque la session comme arrêtée."""
+    """Marque la session comme arrêtée et commande le nettoyage du stockage Edge."""
     clean_session_id = session_id.strip()
     session = db.query(StreamSession).filter(StreamSession.session_id == clean_session_id).first()
     if session:
         session.status = "stopped"
         session.last_active = datetime.datetime.utcnow()
         db.commit()
+
+    # Commander la purge du stockage sur le nœud Edge via MQTT
+    try:
+        from mqtt_client import publish_event
+        publish_event("pledge/commands/purge_session", {"session_id": clean_session_id})
+    except Exception as e:
+        print(f"[Backend] Erreur commande purge MQTT: {e}", flush=True)
+
     return {"status": "stopped", "session_id": clean_session_id}
 
 

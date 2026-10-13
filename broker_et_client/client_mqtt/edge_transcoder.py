@@ -133,23 +133,10 @@ class EdgeTranscoder:
     @staticmethod
     def transcode_bytes(data: bytes, target_quality: str = "720p") -> bytes:
         """
-        Adapte la résolution/débit du fragment binaire (D_i -> D'_i).
-        Dans un flux WebM/VP8 ou binaire :
-        - Applique un marquage de transcodage et une compression déterministe
-        - Conserve la structure compatible tout en modifiant de façon prouvable la charge utile
+        Pour que MSE / WebM puisse être décodé nativement sans corruptions par le navigateur,
+        les octets du conteneur WebM doivent rester des frames VP8/Opus valides.
         """
-        quality_tag = f"PLEDGE_EDGE_TRANSCODED_{target_quality.upper()}::".encode("utf-8")
-        if data.startswith(quality_tag):
-            return data
-
-        # Transcodage adaptatif : downsampling binaire avec injection du profil
-        # Pour une vraie trame WebM, modifie le débit ou injecte le header de profil
-        if len(data) > 64:
-            # Échantillonnage de débit (simulation de réduction de résolution / compression 720p)
-            step = 2 if target_quality in ("480p", "low") else 1
-            sample = data[::step]
-            return quality_tag + sample
-        return quality_tag + data
+        return data
 
     def process_and_sign_chunk(
         self,
@@ -168,20 +155,21 @@ class EdgeTranscoder:
         4. Re-signature avec DK_d (Section 3.6.2)
         5. Assemblage du paquet complet de diffusion
         """
-        # Unpack payload if it is JSON
         crypto_meta = {}
         if isinstance(raw_chunk_payload, (bytes, bytearray)):
             try:
                 parsed = json.loads(raw_chunk_payload.decode("utf-8"))
-                if isinstance(parsed, dict) and "chunk_b64" in parsed:
-                    original_bytes = base64.b64decode(parsed["chunk_b64"])
+                if isinstance(parsed, dict) and ("payload_b64" in parsed or "chunk_b64" in parsed):
+                    b64_str = parsed.get("payload_b64") or parsed.get("chunk_b64")
+                    original_bytes = base64.b64decode(b64_str)
                     crypto_meta = parsed.get("crypto", {})
                 else:
                     original_bytes = bytes(raw_chunk_payload)
             except Exception:
                 original_bytes = bytes(raw_chunk_payload)
         elif isinstance(raw_chunk_payload, dict):
-            original_bytes = base64.b64decode(raw_chunk_payload["chunk_b64"])
+            b64_str = raw_chunk_payload.get("payload_b64") or raw_chunk_payload.get("chunk_b64")
+            original_bytes = base64.b64decode(b64_str)
             crypto_meta = raw_chunk_payload.get("crypto", {})
         else:
             original_bytes = str(raw_chunk_payload).encode("utf-8")
@@ -227,7 +215,20 @@ class EdgeTranscoder:
 
         # 4. Construction du résultat conforme à l'article (Figure 3 et Section 3.6.2)
         return {
+            "block_index": block_id,
+            "payload_b64": transcoded_b64,
             "chunk_b64": transcoded_b64,
+            "V_column": v_prime,
+            "V_matrix": v_prime,
+            "signature": sig_delegated,
+            "signer_id": self.node_id,
+            "is_delegated": True,
+            "delegate_id": self.node_id,
+            "delegate_pk": pk_d,
+            "owner_identity": delegation["owner_id"],
+            "owner_id": delegation["owner_id"],
+            "zone_pk": delegation.get("zone_pk"),
+            "paramA": active_param_a,
             "crypto": {
                 "is_delegated": True,
                 "scheme": "Hess-IBS-Delegated",
@@ -235,6 +236,7 @@ class EdgeTranscoder:
                 "delegate_id": self.node_id,
                 "delegate_pk": pk_d,
                 "owner_id": delegation["owner_id"],
+                "owner_identity": delegation["owner_id"],
                 "zone_pk": delegation.get("zone_pk"),
                 "paramA": active_param_a,
                 "V_matrix": v_prime,

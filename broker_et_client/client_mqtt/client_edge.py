@@ -53,6 +53,10 @@ except Exception as _exc:
 session_stats_lock = threading.Lock()
 session_stats = {}  # session_id -> {"blocks": int, "bytes": int, "active": bool}
 
+# Suivi du nombre de visionneurs connectés par session
+active_viewers_lock = threading.Lock()
+active_viewers = {}  # session_id -> int (nombre de spectateurs actifs)
+
 
 def sanitize_id(raw_id: str) -> str:
     """Assainit un identifiant pour éviter toute traversée de chemin (path traversal)."""
@@ -63,15 +67,23 @@ def sanitize_id(raw_id: str) -> str:
 
 
 def purge_session_directory(session_dir: str):
-    """Purge les blocs résiduels d'une session précédente lors d'un nouvel upload."""
+    """Purge les blocs d'une session terminée et libère intégralement l'espace disque."""
     if os.path.exists(session_dir):
         try:
             for item in os.listdir(session_dir):
-                if item.endswith('.dat'):
-                    try:
-                        os.remove(os.path.join(session_dir, item))
-                    except OSError:
-                        pass
+                item_path = os.path.join(session_dir, item)
+                try:
+                    if os.path.isfile(item_path):
+                        os.remove(item_path)
+                    elif os.path.isdir(item_path):
+                        shutil.rmtree(item_path, ignore_errors=True)
+                except OSError:
+                    pass
+            try:
+                os.rmdir(session_dir)
+            except OSError:
+                pass
+            print(f"[{NODE_ID}] Nettoyage effectué : stockage libéré pour {session_dir}", flush=True)
         except Exception as e:
             print(f"[{NODE_ID}] Avertissement purge session: {e}", flush=True)
 
@@ -86,10 +98,28 @@ def thread_telemetrie_mqtt():
     def on_connect(c, userdata, flags, rc):
         if rc == 0:
             print(f"[{NODE_ID}] Connecté au Broker MQTT {BROKER_HOST}:{BROKER_PORT}", flush=True)
+            c.subscribe("pledge/commands/#", qos=1)
         else:
             print(f"[{NODE_ID}] Erreur de connexion MQTT (Code {rc})", flush=True)
 
+    def on_message(c, userdata, msg):
+        try:
+            topic = msg.topic
+            payload = json.loads(msg.payload.decode('utf-8'))
+            if topic == "pledge/commands/purge_session":
+                s_id = payload.get("session_id")
+                if s_id:
+                    clean_id = sanitize_id(s_id)
+                    s_dir = os.path.join(DOSSIER_RACINE_STOCKAGE, clean_id)
+                    print(f"[{NODE_ID}] Commande MQTT de purge reçue pour : {clean_id}", flush=True)
+                    purge_session_directory(s_dir)
+                    with session_stats_lock:
+                        session_stats.pop(clean_id, None)
+        except Exception as err:
+            print(f"[{NODE_ID}] Erreur message MQTT command: {err}", flush=True)
+
     client.on_connect = on_connect
+    client.on_message = on_message
 
     while True:
         try:
@@ -149,18 +179,21 @@ def thread_telemetrie_mqtt():
 # 2. PLAN DE DONNÉES : STREAMING WEBSOCKET
 # ==========================================
 def write_file_sync(file_path: str, data: bytes):
-    """Écriture synchrone exécutée dans le pool de threads dédié."""
-    with open(file_path, "wb") as f:
+    """Écriture synchrone atomique exécutée dans le pool de threads dédié."""
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    tmp_path = f"{file_path}.tmp"
+    with open(tmp_path, "wb") as f:
         f.write(data)
+    os.replace(tmp_path, file_path)
 
 
 async def reception_flux_video(websocket, client_id):
     clean_id = sanitize_id(client_id)
     dossier_client = os.path.join(DOSSIER_RACINE_STOCKAGE, clean_id)
-    os.makedirs(dossier_client, exist_ok=True)
     
     # Nettoyage des résidus d'une session précédente
     purge_session_directory(dossier_client)
+    os.makedirs(dossier_client, exist_ok=True)
 
     with session_stats_lock:
         session_stats[clean_id] = {"blocks": 0, "bytes": 0, "active": True}
@@ -175,6 +208,7 @@ async def reception_flux_video(websocket, client_id):
             chunk_size = len(raw_data)
             bloc_id = compteur_bloc
 
+            owner_real_id = clean_id
             # Détection et parsing du paquet de transmission Phase 4
             try:
                 text_msg = message if isinstance(message, str) else message.decode('utf-8')
@@ -184,6 +218,8 @@ async def reception_flux_video(websocket, client_id):
                         bloc_id = packet_obj.get("block_index", compteur_bloc)
                         if "payload_b64" in packet_obj:
                             chunk_size = len(packet_obj["payload_b64"])
+                        if "signer_id" in packet_obj:
+                            owner_real_id = packet_obj["signer_id"]
             except Exception:
                 pass
 
@@ -194,21 +230,21 @@ async def reception_flux_video(websocket, client_id):
 
             # Phase 3 : Worker de Transcodage Edge et re-signature déléguée (Section 3.6.2)
             if edge_transcoder:
-                def transcode_and_save_worker(raw_bytes, b_id):
+                def transcode_and_save_worker(raw_bytes, b_id, real_owner):
                     try:
                         transcoded_res = edge_transcoder.process_and_sign_chunk(
                             session_id=clean_id,
                             block_id=b_id,
                             raw_chunk_payload=raw_bytes,
                             target_quality="720p",
-                            owner_id=clean_id,
+                            owner_id=real_owner,
                         )
                         trans_path = os.path.join(dossier_client, f"bloc_{b_id}_720p.dat")
                         write_file_sync(trans_path, json.dumps(transcoded_res).encode("utf-8"))
                     except Exception as err:
                         print(f"[{NODE_ID}] Avertissement transcodage bloc {b_id}: {err}", flush=True)
 
-                loop.run_in_executor(io_executor, transcode_and_save_worker, raw_data, bloc_id)
+                loop.run_in_executor(io_executor, transcode_and_save_worker, raw_data, bloc_id, owner_real_id)
 
             # Mise à jour rapide des statistiques en mémoire
             with session_stats_lock:
@@ -226,6 +262,23 @@ async def reception_flux_video(websocket, client_id):
         with session_stats_lock:
             if clean_id in session_stats:
                 session_stats[clean_id]["active"] = False
+
+        # Planifier la purge automatique après la fin du live
+        def delayed_purge():
+            time.sleep(4)
+            # Attendre que les éventuels spectateurs aient terminé la lecture
+            for _ in range(15):
+                with active_viewers_lock:
+                    if active_viewers.get(clean_id, 0) == 0:
+                        break
+                time.sleep(1)
+
+            print(f"[{NODE_ID}] Purge automatique post-live du stockage pour : {clean_id}", flush=True)
+            purge_session_directory(dossier_client)
+            with session_stats_lock:
+                session_stats.pop(clean_id, None)
+
+        threading.Thread(target=delayed_purge, daemon=True).start()
 
 
 async def envoi_flux_video(websocket, client_id, mode="live", fmt="auto", quality="original"):
@@ -285,93 +338,95 @@ async def envoi_flux_video(websocket, client_id, mode="live", fmt="auto", qualit
             except UnicodeDecodeError:
                 await websocket.send(data_bytes)
 
-    if mode == "live" and dernier_bloc > BUFFER_INITIAL_BLOCS:
-        # En mode live avec historique :
-        # 1. Envoi prioritaire du bloc 0 (contenant l'en-tête d'initialisation WebM nécessaire à MSE)
-        chemin_init = os.path.join(dossier_client, f"bloc_0{suffix}.dat")
-        if not os.path.exists(chemin_init) and suffix:
-            chemin_init = os.path.join(dossier_client, "bloc_0.dat")
+    # Suivi des spectateurs connectés
+    with active_viewers_lock:
+        active_viewers[clean_id] = active_viewers.get(clean_id, 0) + 1
 
-        if os.path.exists(chemin_init):
-            try:
-                with open(chemin_init, "rb") as f:
-                    donnees_init = f.read()
-                await envoyer_bloc(donnees_init)
-                # Court délai d'attente pour acquittement éventuel
-                try:
-                    await asyncio.wait_for(websocket.recv(), timeout=0.05)
-                except asyncio.TimeoutError:
-                    pass
-            except Exception as e:
-                print(f"[{NODE_ID}] Erreur envoi bloc initial WebM: {e}", flush=True)
-
-        # 2. Démarrage directement sur les blocs récents (tampon glissant de 3 blocs)
-        compteur_bloc = max(1, dernier_bloc - BUFFER_INITIAL_BLOCS)
-        print(f"[{NODE_ID}] Diffusion Live {clean_id} : amorçage au bloc {compteur_bloc} (dernier={dernier_bloc})", flush=True)
-    else:
-        # Mode replay / début du flux
-        compteur_bloc = 0
-        print(f"[{NODE_ID}] Lecture {clean_id} : démarrage depuis le début (bloc 0)", flush=True)
+    # Amorçage séquentiel depuis le bloc 0 pour garantir l'envoi de l'en-tête WebM (MSE)
+    # sans rupture de continuité temporelle
+    compteur_bloc = 0
+    print(f"[{NODE_ID}] Lecture {clean_id} : démarrage séquentiel depuis bloc 0 (mode={mode}, dernier={dernier_bloc})", flush=True)
 
     inactivity_counter = 0
     MAX_WAIT_SECONDS = 20
 
-    while True:
-        chemin_fichier = os.path.join(dossier_client, f"bloc_{compteur_bloc}{suffix}.dat")
-        # Si le bloc transcodé demandé n'est pas encore sur disque, vérifier le bloc original
-        if not os.path.exists(chemin_fichier) and suffix:
-            chemin_orig = os.path.join(dossier_client, f"bloc_{compteur_bloc}.dat")
-            if os.path.exists(chemin_orig) and edge_transcoder:
-                try:
-                    with open(chemin_orig, "rb") as f:
-                        raw_bytes = f.read()
-                    transcoded_res = edge_transcoder.process_and_sign_chunk(
-                        session_id=clean_id,
-                        block_id=compteur_bloc,
-                        raw_chunk_payload=raw_bytes,
-                        target_quality="720p",
-                        owner_id=clean_id,
-                    )
-                    write_file_sync(chemin_fichier, json.dumps(transcoded_res).encode("utf-8"))
-                except Exception as e:
-                    print(f"[{NODE_ID}] Erreur transcodage volée bloc {compteur_bloc}: {e}", flush=True)
+    try:
+        while True:
+            chemin_fichier = os.path.join(dossier_client, f"bloc_{compteur_bloc}{suffix}.dat")
+            # Si le bloc transcodé demandé n'est pas encore sur disque, vérifier le bloc original
+            if not os.path.exists(chemin_fichier) and suffix:
+                chemin_orig = os.path.join(dossier_client, f"bloc_{compteur_bloc}.dat")
+                if os.path.exists(chemin_orig) and edge_transcoder:
+                    try:
+                        with open(chemin_orig, "rb") as f:
+                            raw_bytes = f.read()
+                        transcoded_res = edge_transcoder.process_and_sign_chunk(
+                            session_id=clean_id,
+                            block_id=compteur_bloc,
+                            raw_chunk_payload=raw_bytes,
+                            target_quality="720p",
+                            owner_id=clean_id,
+                        )
+                        write_file_sync(chemin_fichier, json.dumps(transcoded_res).encode("utf-8"))
+                    except Exception as e:
+                        print(f"[{NODE_ID}] Erreur transcodage volée bloc {compteur_bloc}: {e}", flush=True)
+                        chemin_fichier = chemin_orig
+                else:
                     chemin_fichier = chemin_orig
+
+            if os.path.exists(chemin_fichier):
+                inactivity_counter = 0
+                try:
+                    # Lecture du bloc
+                    with open(chemin_fichier, "rb") as f:
+                        donnees = f.read()
+
+                    await envoyer_bloc(donnees)
+                    compteur_bloc += 1
+
+                    # Mise à jour dynamique du dernier bloc disponible
+                    with session_stats_lock:
+                        if clean_id in session_stats:
+                            dernier_bloc = max(dernier_bloc, session_stats[clean_id].get("blocks", 0) - 1)
+
+                    if compteur_bloc >= dernier_bloc:
+                        await asyncio.sleep(0.04)  # Attente du prochain bloc au bord du direct
+                    else:
+                        await asyncio.sleep(0.02)  # Pacing régulier de rattrapage (50 blocs/sec)
+
+                except (websockets.exceptions.ConnectionClosed, asyncio.CancelledError):
+                    print(f"[{NODE_ID}] Visionneur déconnecté de {clean_id}", flush=True)
+                    break
+                except Exception as e:
+                    print(f"[{NODE_ID}] Erreur lecture bloc: {e}", flush=True)
+                    break
             else:
-                chemin_fichier = chemin_orig
+                # Vérifier si la session est terminée et si le spectateur a déjà tout lu
+                is_active = True
+                with session_stats_lock:
+                    is_active = session_stats.get(clean_id, {}).get("active", False)
 
-        if os.path.exists(chemin_fichier):
-            inactivity_counter = 0
-            try:
-                # Lecture du bloc
-                with open(chemin_fichier, "rb") as f:
-                    donnees = f.read()
+                if not is_active and compteur_bloc >= dernier_bloc and dernier_bloc > 0:
+                    print(f"[{NODE_ID}] Diffusion achevée pour {clean_id}. Fin de lecture normale.", flush=True)
+                    try:
+                        await websocket.close(code=1000, reason="Fin du live")
+                    except Exception:
+                        pass
+                    break
 
-                await envoyer_bloc(donnees)
-                compteur_bloc += 1
-
-                # Attente facultative d'acquittement (avec court timeout de 0.1s)
-                try:
-                    await asyncio.wait_for(websocket.recv(), timeout=0.1)
-                except asyncio.TimeoutError:
-                    pass
-
-            except (websockets.exceptions.ConnectionClosed, asyncio.CancelledError):
-                print(f"[{NODE_ID}] Visionneur déconnecté de {clean_id}", flush=True)
-                break
-            except Exception as e:
-                print(f"[{NODE_ID}] Erreur lecture bloc: {e}", flush=True)
-                break
-        else:
-            # Vérifier si la session est encore active ou fermée (polling rapide à 50ms)
-            await asyncio.sleep(0.05)
-            inactivity_counter += 0.05
-            if inactivity_counter >= MAX_WAIT_SECONDS:
-                print(f"[{NODE_ID}] Timeout inactivité flux pour {clean_id}. Fermeture lecture.", flush=True)
-                try:
-                    await websocket.close(code=1000, reason="Fin du flux ou inactivité")
-                except Exception:
-                    pass
-                break
+                # Polling d'attente d'un nouveau bloc
+                await asyncio.sleep(0.05)
+                inactivity_counter += 0.05
+                if inactivity_counter >= MAX_WAIT_SECONDS:
+                    print(f"[{NODE_ID}] Timeout inactivité flux pour {clean_id}. Fermeture lecture.", flush=True)
+                    try:
+                        await websocket.close(code=1000, reason="Fin du flux ou inactivité")
+                    except Exception:
+                        pass
+                    break
+    finally:
+        with active_viewers_lock:
+            active_viewers[clean_id] = max(0, active_viewers.get(clean_id, 1) - 1)
 
 
 async def routeur_ws(websocket, path=None):

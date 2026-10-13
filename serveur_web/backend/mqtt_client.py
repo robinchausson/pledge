@@ -157,3 +157,15 @@ def start_mqtt():
 
         threading.Thread(target=monitor_reconnect, daemon=True).start()
         return _mqtt_client
+
+
+def publish_event(topic: str, payload: dict | str):
+    """Publie un message / commande MQTT de façon asynchrone et sécurisée."""
+    global _mqtt_client
+    if _mqtt_client:
+        try:
+            body = json.dumps(payload) if isinstance(payload, dict) else str(payload)
+            _mqtt_client.publish(topic, body, qos=1)
+        except Exception as e:
+            print(f"[Backend MQTT] Erreur publish sur {topic}: {e}", flush=True)
+

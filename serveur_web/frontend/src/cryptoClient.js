@@ -281,6 +281,7 @@ export function verifyIncomingBlock(chunkBytes, packet, defaultZonePk = null) {
   const expectedV = packet.V_column || packet.V_matrix || []
   const signature = packet.signature || null
   const signerId = packet.signer_id || packet.owner_email || 'streamer@pledge.local'
+  const ownerIdentity = packet.owner_identity || packet.owner_id || signerId
   const isDelegated = Boolean(packet.is_delegated)
   const zonePk = packet.zone_pk || defaultZonePk
 
@@ -315,7 +316,7 @@ export function verifyIncomingBlock(chunkBytes, packet, defaultZonePk = null) {
       const res = verifyDelegatedHessIBS(
         localV,
         signature,
-        signerId,
+        ownerIdentity,
         zonePk,
         packet.delegate_id,
         packet.delegate_pk,
@@ -383,7 +384,7 @@ export function base64ToUint8Array(b64) {
  * Récupère ou dérive de façon déterministe la part secrète de l'utilisateur Sw = ts * H1(IDw)
  * et la clé publique de zone PK = ts * G2 pour le diffuseur.
  */
-export function deriveStreamerKey(identity, masterScalar = 987654321n) {
+export function deriveStreamerKey(identity, masterScalar = 123456789n) {
   const ts = BigInt(masterScalar)
   const zonePkPoint = G2.Point.BASE.multiply(ts)
   const zonePk = g2ToJson(zonePkPoint)
