@@ -9,7 +9,7 @@ except ImportError:
     from models import SessionLocal, EdgeNode, DataLocation
 
 # On récupère le broker par défaut ou via variable d'environnement
-BROKER_IP = os.getenv("BROKER_IP", "10.4.19.234")
+BROKER_IP = os.getenv("BROKER_IP", "127.0.0.1")
 BROKER_PORT = int(os.getenv("BROKER_PORT", 1883))
 
 def on_connect(client, userdata, flags, rc):

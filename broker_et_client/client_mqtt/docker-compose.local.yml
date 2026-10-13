@@ -7,6 +7,8 @@ services:
     restart: always
     ports:
       - "8444:8444"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - BROKER_IP=host.docker.internal
       - BROKER_PORT=1883
@@ -15,8 +17,9 @@ services:
       - PORT_WSS=8444
       - NODE_IP=host.docker.internal
       - STREAM_QUEUE_SIZE=64
-      - STORAGE_QUEUE_SIZE=256
-      - STORAGE_BATCH_SIZE=8
-      - STORAGE_FLUSH_SECONDS=0.25
+      - STORAGE_QUEUE_SIZE=512
+      - STORAGE_BATCH_SIZE=32
+      - STORAGE_FLUSH_SECONDS=0.5
+      - UPLOAD_ACK_EVERY=0
     volumes:
       - /:/host_root:ro

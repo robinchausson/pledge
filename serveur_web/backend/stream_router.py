@@ -1,4 +1,5 @@
 import base64
+import datetime
 import logging
 import os
 
@@ -20,6 +21,7 @@ CRYPTO_SERVERS = {
     "Zone_2": os.getenv("CRYPTO_URL_ZONE_2", "https://127.0.0.1:8444"),
 }
 CRYPTO_INLINE = os.getenv("STREAM_CRYPTO_INLINE", "false").lower() == "true"
+EDGE_WS_SCHEME = os.getenv("EDGE_WS_SCHEME", "ws").lower()
 crypto_client: httpx.AsyncClient | None = None
 
 
@@ -70,7 +72,13 @@ async def publish_stream(
     await websocket.accept()
     target_node = (
         db.query(EdgeNode)
-        .filter(EdgeNode.ip_address.isnot(None), EdgeNode.wss_port.isnot(None))
+        .filter(
+            EdgeNode.ip_address.isnot(None),
+            EdgeNode.wss_port.isnot(None),
+            EdgeNode.last_seen >= (
+                datetime.datetime.utcnow() - datetime.timedelta(seconds=30)
+            ),
+        )
         .order_by(EdgeNode.storage_available_gb.desc())
         .first()
     )
@@ -89,12 +97,16 @@ async def publish_stream(
         location.node_id = target_node.node_id
     db.commit()
 
-    edge_ws_url = f"ws://{target_node.ip_address}:{target_node.wss_port}/upload/{client_id}"
+    edge_ws_url = (
+        f"{EDGE_WS_SCHEME}://{target_node.ip_address}:"
+        f"{target_node.wss_port}/upload/{client_id}"
+    )
     try:
         async with websockets.connect(
             edge_ws_url,
             max_size=4 * 1024 * 1024,
             compression=None,
+            open_timeout=5,
         ) as edge_ws:
             while True:
                 chunk = await websocket.receive_bytes()
@@ -154,12 +166,16 @@ async def watch_stream(
         await websocket.close(code=1011, reason="Noeud Edge source introuvable")
         return
 
-    edge_ws_url = f"ws://{source_node.ip_address}:{source_node.wss_port}/download/{client_id}"
+    edge_ws_url = (
+        f"{EDGE_WS_SCHEME}://{source_node.ip_address}:"
+        f"{source_node.wss_port}/download/{client_id}"
+    )
     try:
         async with websockets.connect(
             edge_ws_url,
             max_size=4 * 1024 * 1024,
             compression=None,
+            open_timeout=5,
         ) as edge_ws:
             while True:
                 packet = await edge_ws.recv()

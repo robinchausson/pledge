@@ -6,10 +6,12 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - BROKER_IP=${TAILSCALE_IP_BROKER:-100.x.x.x}
+      - BROKER_IP=${BROKER_IP:?Set BROKER_IP in serveur_web/.env}
       - BROKER_PORT=1883
-      - CRYPTO_URL_ZONE_1=${TAILSCALE_URL_CRYPTO_1:-https://100.x.x.x:8443}
+      - CRYPTO_URL_ZONE_1=${CRYPTO_URL_ZONE_1:?Set CRYPTO_URL_ZONE_1 in serveur_web/.env}
       - STREAM_CRYPTO_INLINE=${STREAM_CRYPTO_INLINE:-false}
+      - EDGE_WS_SCHEME=${EDGE_WS_SCHEME:-ws}
+      - SECRET_KEY=${SECRET_KEY:?Set SECRET_KEY in serveur_web/.env}
     volumes:
       - ./backend/data:/app/data
       - /var/run/docker.sock:/var/run/docker.sock
@@ -21,4 +23,4 @@ services:
     ports:
       - "5173:5173"
     environment:
-      - VITE_API_URL=${TAILSCALE_URL_BACKEND:-http://100.x.x.x:8000}
+      - VITE_API_URL=${VITE_API_URL:?Set VITE_API_URL in serveur_web/.env}

@@ -18,7 +18,7 @@ import psutil
 import websockets
 
 
-BROKER_IP = os.getenv("BROKER_IP", "10.4.19.234")
+BROKER_IP = os.getenv("BROKER_IP", "127.0.0.1")
 BROKER_PORT = int(os.getenv("BROKER_PORT", "1883"))
 BROKER_KEEPALIVE = int(os.getenv("BROKER_KEEPALIVE", "30"))
 MQTT_USERNAME = os.getenv("MQTT_USERNAME")
@@ -36,7 +36,7 @@ MAX_MESSAGE_SIZE = int(os.getenv("MAX_MESSAGE_SIZE", str(4 * 1024 * 1024)))
 STORAGE_SEGMENT_BYTES = int(os.getenv("STORAGE_SEGMENT_BYTES", str(64 * 1024 * 1024)))
 STORAGE_SEGMENT_SECONDS = float(os.getenv("STORAGE_SEGMENT_SECONDS", "2"))
 TELEMETRY_INTERVAL = float(os.getenv("TELEMETRY_INTERVAL", "10"))
-UPLOAD_ACK_EVERY = int(os.getenv("UPLOAD_ACK_EVERY", "16"))
+UPLOAD_ACK_EVERY = int(os.getenv("UPLOAD_ACK_EVERY", "0"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 
@@ -304,7 +304,11 @@ def thread_telemetrie_mqtt():
             "active_streams": sum(values.get("active_uploads", 0) for values in snapshot.values()),
             "metrics": dict(total),
         }
-        client.publish(f"telemetrie/{ZONE_ID}/{NODE_ID}", json.dumps(payload), qos=0)
+        client.publish(
+            f"telemetrie/{ZONE_ID}/{NODE_ID}",
+            json.dumps(payload),
+            qos=0,
+        )
         for client_id, values in snapshot.items():
             client.publish(
                 f"telemetrie/{ZONE_ID}/{NODE_ID}/clients/{client_id}",

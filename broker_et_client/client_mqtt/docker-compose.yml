@@ -6,15 +6,16 @@ services:
     ports:
       - "8444:8444"
     environment:
-      - BROKER_IP=${TAILSCALE_IP_BROKER:-100.x.x.x}
+      - BROKER_IP=${BROKER_IP:?Set BROKER_IP in client_mqtt/.env}
       - BROKER_PORT=1883
-      - NODE_ID=${NODE_ID:-Tailscale_Edge_Node}
+      - NODE_ID=${NODE_ID:-Edge_Node}
       - ZONE_ID=${ZONE_ID:-Zone_1}
       - PORT_WSS=8444
-      - NODE_IP=${TAILSCALE_IP_NODE:-100.x.x.x}
+      - NODE_IP=${NODE_IP:?Set NODE_IP in client_mqtt/.env}
       - STREAM_QUEUE_SIZE=${STREAM_QUEUE_SIZE:-64}
-      - STORAGE_QUEUE_SIZE=${STORAGE_QUEUE_SIZE:-256}
-      - STORAGE_BATCH_SIZE=${STORAGE_BATCH_SIZE:-8}
-      - STORAGE_FLUSH_SECONDS=${STORAGE_FLUSH_SECONDS:-0.25}
+      - STORAGE_QUEUE_SIZE=${STORAGE_QUEUE_SIZE:-512}
+      - STORAGE_BATCH_SIZE=${STORAGE_BATCH_SIZE:-32}
+      - STORAGE_FLUSH_SECONDS=${STORAGE_FLUSH_SECONDS:-0.5}
+      - UPLOAD_ACK_EVERY=${UPLOAD_ACK_EVERY:-0}
     volumes:
       - /:/host_root:ro

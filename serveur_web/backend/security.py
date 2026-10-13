@@ -1,9 +1,13 @@
 from datetime import datetime, timedelta, timezone
+import os
 import bcrypt
 import jwt
 
 # Constantes de sécurité (À mettre dans un fichier .env en production)
-SECRET_KEY = "VOTRE_CLE_SECRETE_TRES_LONGUE_ET_COMPLEXE" 
+SECRET_KEY = os.getenv(
+    "SECRET_KEY",
+    "dev-only-change-this-secret-before-production",
+)
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 15
 REFRESH_TOKEN_EXPIRE_DAYS = 7

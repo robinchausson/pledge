@@ -65,7 +65,10 @@ origins = [
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
-    allow_origin_regex=r"http://100\.\d+\.\d+\.\d+(:5173)?", # Autorise les IPs Tailscale
+    allow_origin_regex=(
+        r"http://(?:localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|"
+        r"192\.168\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[0-1])\.\d+\.\d+)(:5173)?"
+    ),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -73,6 +76,10 @@ app.add_middleware(
 
 # Inclusion du routeur de streaming
 app.include_router(stream_router)
+
+@app.get("/health")
+def health() -> dict[str, str]:
+    return {"status": "ok"}
 
 # --- 1. INSCRIPTION ---
 @app.post("/auth/register", response_model=schemas.UserOut)

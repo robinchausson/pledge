@@ -3,18 +3,18 @@
 Ce document référence l'ensemble des commandes Docker pour lancer l'architecture complète du projet Pledge.
 Le déploiement peut se faire de deux manières :
 1. **Local** (pour le développement, tout sur la même machine).
-2. **Distribué / Réseau Tailscale** (pour simuler une véritable architecture Edge sur plusieurs ordinateurs).
+2. **Distribué / Réseau local** (pour simuler une architecture Edge sur plusieurs ordinateurs).
 
 ---
 
-## 🌐 Mode Distribué (Réseau Tailscale ou LAN)
-Dans ce mode, vous déployez chaque composant sur des machines différentes. Le routage réseau se fait via des adresses IP (idéalement via un VPN comme Tailscale `100.x.x.x`). 
+## 🌐 Mode Distribué (Réseau local)
+Dans ce mode, vous déployez chaque composant sur des machines différentes. Le routage réseau se fait via les adresses IP ou les noms DNS du réseau local.
 Les fichiers `docker-compose.yml` de base sont configurés pour ce mode.
 
 ### 1. Le Serveur Web (Backend FastAPI & Frontend React)
 La machine centrale gérant l'API, la base de données et l'interface utilisateur.
 * **Dossier :** `serveur_web`
-* **Configuration :** Copiez le fichier `.env.example` en `.env` et renseignez les IP Tailscale des autres serveurs (Broker, Serveurs Crypto, et l'IP de cette propre machine).
+* **Configuration :** Copiez le fichier `.env.example` en `.env` et renseignez `BROKER_IP`, `CRYPTO_URL_ZONE_1`, `VITE_API_URL` et `EDGE_WS_SCHEME`.
 * **Lancement :**
   ```bash
   cd serveur_web
@@ -35,13 +35,13 @@ Le chef d'orchestre réseau qui transmet la télémétrie des Nœuds Edge au Ser
 ### 3. Les Nœuds Edge (Stockage)
 Les machines qui reçoivent, stockent et diffusent les flux vidéo. À lancer sur toutes vos machines de stockage.
 * **Dossier :** `broker_et_client/client_mqtt`
-* **Configuration :** Copiez `.env.example` en `.env` et définissez l'IP Tailscale du Broker, ainsi que l'IP Tailscale de CETTE machine Edge (pour que le Serveur Web puisse la trouver).
+* **Configuration :** Copiez `.env.example` en `.env` et définissez `BROKER_IP` et `NODE_IP` (adresse LAN de cette machine Edge, accessible par le Serveur Web).
 * **Lancement :**
   ```bash
   cd broker_et_client/client_mqtt
   docker compose up -d --build
   ```
-* **Ports exposés :** `8444` par défaut (WSS).
+* **Ports exposés :** `8444` par défaut (`ws` sans certificat Edge, `wss` si TLS est configuré).
 
 ### 4. Le Serveur Crypto
 Génère et vérifie les signatures cryptographiques.
@@ -61,7 +61,7 @@ Si vous souhaitez tout faire tourner sur votre PC sans vous soucier des adresses
 
 Utilisez systématiquement le fichier **`docker-compose.local.yml`** au lieu du classique `docker-compose.yml`. Il est déjà préconfiguré avec `host.docker.internal` et `localhost` !
 
-**Pour chaque dossier (`serveur_web`, `broker_mqtt`, `client_mqtt`, `serveur_crypto`), lancez :**
+**Pour chaque dossier (`serveur_web`, `broker_mqtt`, `client_mqtt`, `serveur_crypto`), utilisez le fichier `docker-compose.local.yml`.**
 ```bash
 docker compose -f docker-compose.local.yml up -d --build
 ```
