@@ -12,6 +12,7 @@ services:
       - BROKER_PORT=1883
       # Le serveur crypto dockerisé utilise TOUJOURS le HTTPS grâce à son entrypoint !
       - CRYPTO_URL_ZONE_1=https://host.docker.internal:8443
+      - STREAM_CRYPTO_INLINE=false
     volumes:
       - ./backend/data:/app/data
       - /var/run/docker.sock:/var/run/docker.sock

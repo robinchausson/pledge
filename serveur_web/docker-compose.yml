@@ -9,6 +9,7 @@ services:
       - BROKER_IP=${TAILSCALE_IP_BROKER:-100.x.x.x}
       - BROKER_PORT=1883
       - CRYPTO_URL_ZONE_1=${TAILSCALE_URL_CRYPTO_1:-https://100.x.x.x:8443}
+      - STREAM_CRYPTO_INLINE=${STREAM_CRYPTO_INLINE:-false}
     volumes:
       - ./backend/data:/app/data
       - /var/run/docker.sock:/var/run/docker.sock

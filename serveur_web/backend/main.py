@@ -10,13 +10,13 @@ import jwt
 try:
     from .models import get_db, User, SessionLocal, EdgeNode, DataLocation
     from . import schemas, security
-    from .stream_router import router as stream_router
+    from .stream_router import close_http_client, router as stream_router
     from .mqtt_client import start_mqtt
 except ImportError:
     from models import get_db, User, SessionLocal, EdgeNode, DataLocation
     import schemas
     import security
-    from stream_router import router as stream_router
+    from stream_router import close_http_client, router as stream_router
     from mqtt_client import start_mqtt
 
 mqtt_client_instance = None
@@ -53,6 +53,7 @@ async def lifespan(app: FastAPI):
     if mqtt_client_instance:
         mqtt_client_instance.loop_stop()
         mqtt_client_instance.disconnect()
+    await close_http_client()
 
 app = FastAPI(title="Smart Home Edge API", lifespan=lifespan)
 

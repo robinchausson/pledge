@@ -14,5 +14,9 @@ services:
       - ZONE_ID=Zone_1
       - PORT_WSS=8444
       - NODE_IP=host.docker.internal
+      - STREAM_QUEUE_SIZE=64
+      - STORAGE_QUEUE_SIZE=256
+      - STORAGE_BATCH_SIZE=8
+      - STORAGE_FLUSH_SECONDS=0.25
     volumes:
       - /:/host_root:ro

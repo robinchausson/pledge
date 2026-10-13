@@ -70,6 +70,24 @@ docker compose -f docker-compose.local.yml up -d --build
 
 ## 🛠️ Commandes utiles
 
+## ⚡ Réglages du streaming
+
+Le transport vidéo est binaire et le stockage Edge est asynchrone afin de ne pas
+bloquer la lecture en direct. La vérification cryptographique complète par
+fragment est désactivée par défaut (`STREAM_CRYPTO_INLINE=false`) : elle peut
+être réactivée pour un environnement de test, mais elle ajoute une requête
+HTTPS et un calcul CPU à chaque fragment.
+
+Les paramètres Edge ajustables sont :
+
+- `STREAM_QUEUE_SIZE` : fenêtre live par viewer (64 par défaut en Docker).
+- `STORAGE_QUEUE_SIZE` : file indépendante pour le stockage (256 par défaut).
+- `STORAGE_BATCH_SIZE` : nombre de fragments écrits ensemble.
+- `STORAGE_FLUSH_SECONDS` : fréquence maximale de flush disque.
+
+Pour privilégier la sécurité d'audit plutôt que la latence, définir
+`STREAM_CRYPTO_INLINE=true` sur le backend.
+
 **Voir les logs d'un composant en direct :**
 ```bash
 docker compose logs -f

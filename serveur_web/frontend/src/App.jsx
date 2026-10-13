@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef } from 'react'
 
 const API_URL = import.meta.env.VITE_API_URL || ''
+const WS_URL = API_URL.replace(/^http/, 'ws')
 
 
 
@@ -138,10 +139,17 @@ function StreamerInterface({ user }) {
 
   async function startStream() {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          width: { ideal: 1280, max: 1920 },
+          height: { ideal: 720, max: 1080 },
+          frameRate: { ideal: 30, max: 30 },
+        },
+        audio: true,
+      })
       videoRef.current.srcObject = stream
       
-      const socket = new WebSocket(`ws://localhost:8000/api/stream/publish/${user.email}`)
+      const socket = new WebSocket(`${WS_URL}/api/stream/publish/${encodeURIComponent(user.email)}`)
       socket.onopen = () => {
         setStreaming(true)
         // Note: mimeType fallback if vp8 is not supported on this browser (ex: Safari)
@@ -152,7 +160,7 @@ function StreamerInterface({ user }) {
             socket.send(await e.data.arrayBuffer())
           }
         }
-        recorder.start(1000)
+        recorder.start(250)
         setMediaRecorder(recorder)
       }
       
@@ -214,7 +222,7 @@ function ViewerInterface({ user }) {
     if (!targetId) return
     setWatching(true)
     
-    const socket = new WebSocket(`ws://localhost:8000/api/stream/watch/${targetId}`)
+    const socket = new WebSocket(`${WS_URL}/api/stream/watch/${encodeURIComponent(targetId)}`)
     socket.binaryType = "arraybuffer"
     
     const mediaSource = new MediaSource()
@@ -229,12 +237,16 @@ function ViewerInterface({ user }) {
       const mime = MediaRecorder.isTypeSupported('video/webm; codecs=vp8,opus') ? 'video/webm; codecs=vp8,opus' : 'video/webm'
       const sourceBuffer = mediaSource.addSourceBuffer(mime)
       const queue = []
+      const maxQueuedChunks = 12
       
       socket.onmessage = (event) => {
         const chunk = new Uint8Array(event.data)
         if (!sourceBuffer.updating && queue.length === 0) {
           sourceBuffer.appendBuffer(chunk)
         } else {
+          if (queue.length >= maxQueuedChunks) {
+            queue.splice(0, Math.ceil(maxQueuedChunks / 3))
+          }
           queue.push(chunk)
         }
       }

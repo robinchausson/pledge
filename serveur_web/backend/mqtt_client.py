@@ -39,7 +39,10 @@ def on_message(client, userdata, msg):
                 
             node.ip_address = payload.get("ip_address")
             node.wss_port = payload.get("port_wss")
-            node.storage_available_gb = payload.get("stockage_dispo_gb")
+            node.storage_available_gb = payload.get(
+                "storage_free_gb",
+                payload.get("stockage_dispo_gb"),
+            )
             node.cpu_usage_pct = payload.get("cpu_usage_pct")
             node.last_seen = datetime.datetime.utcnow()
             

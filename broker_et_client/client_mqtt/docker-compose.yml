@@ -12,5 +12,9 @@ services:
       - ZONE_ID=${ZONE_ID:-Zone_1}
       - PORT_WSS=8444
       - NODE_IP=${TAILSCALE_IP_NODE:-100.x.x.x}
+      - STREAM_QUEUE_SIZE=${STREAM_QUEUE_SIZE:-64}
+      - STORAGE_QUEUE_SIZE=${STORAGE_QUEUE_SIZE:-256}
+      - STORAGE_BATCH_SIZE=${STORAGE_BATCH_SIZE:-8}
+      - STORAGE_FLUSH_SECONDS=${STORAGE_FLUSH_SECONDS:-0.25}
     volumes:
       - /:/host_root:ro
