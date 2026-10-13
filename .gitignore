@@ -1,6 +1,7 @@
 # Environment variables
 .env
 *.env.local
+broker_et_client/client_mqtt/.env
 !.env.example
 
 # Python
@@ -57,6 +58,7 @@ mosquitto_data/
 
 # IDE / OS
 .vscode/
+.vscode/settings.json
 .idea/
 .DS_Store
 Thumbs.db
