@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y gcc python3-dev openssl \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY crypto_node.py .
+COPY crypto_engine.py crypto_node.py mobility_manager.py ./
 COPY docker-entrypoint.sh .
 RUN sed -i -e 's/\r$//' docker-entrypoint.sh && chmod +x docker-entrypoint.sh
 

@@ -1,151 +1,102 @@
 import base64
-import functools
-import hashlib
 import os
-import secrets
 import sys
 from contextlib import asynccontextmanager
+from typing import Any
 
-sys.setrecursionlimit(5000)
-
-import numpy as np
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
-from py_ecc.bn128 import FQ, G1, G2, add, curve_order, multiply, pairing
 
+import crypto_engine as engine
 
-SIS_L = 64
-SIS_M = 1536
-SIS_Q = 4099
-PARAM_A = 42
+ZONE_ID = os.getenv("ZONE_ID", "Zone_1")
 
 
 class CryptoState:
     secret_scalar: int | None = None
     public_key: tuple | None = None
-    secret_share: tuple | None = None
 
 
 state = CryptoState()
-
-
-def point_to_json(point: tuple) -> list[int]:
-    return [int(coordinate.n) if hasattr(coordinate, "n") else int(coordinate) for coordinate in point]
-
-
-def json_to_point(coords: list[int]) -> tuple:
-    if len(coords) != 2:
-        raise ValueError("Un point G1 doit comporter exactement 2 coordonnées")
-    return (FQ(int(coords[0])), FQ(int(coords[1])))
-
-
-@functools.lru_cache(maxsize=1)
-def reconstruct_matrix_a(seed: int) -> np.ndarray:
-    generator = np.random.default_rng(seed)
-    return generator.integers(0, SIS_Q, size=(SIS_L, SIS_M), dtype=np.int64)
-
-
-def hash_h3(data: bytes) -> list[int]:
-    digest = hashlib.sha256(data).digest()
-    return list((digest * ((SIS_M // len(digest)) + 1))[:SIS_M])
-
-
-def compute_integrity(data: bytes) -> list[int]:
-    vector = hash_h3(data)
-    return np.mod(np.dot(reconstruct_matrix_a(PARAM_A), vector), SIS_Q).tolist()
-
-
-def hash_h2(vector: list[int], param_a: int, pairing_value: object) -> int:
-    message = f"{vector}{param_a}{pairing_value}".encode()
-    return int(hashlib.sha256(message).hexdigest(), 16) % curve_order
-
-
-def generate_signature(vector: list[int], param_a: int) -> dict:
-    if state.secret_share is None:
-        raise RuntimeError("La clé privée de zone n'est pas initialisée")
-
-    # Génération réelle de signature Hess-IBS sur courbe BN128
-    nonce = secrets.randbelow(curve_order - 1) + 1
-    pairing_value = pairing(G2, multiply(G1, nonce))
-    challenge = hash_h2(vector, param_a, pairing_value)
-    
-    # signature_point = (challenge * secret_key) + (nonce * G1)
-    sig_term1 = multiply(state.secret_share, challenge)
-    sig_term2 = multiply(G1, nonce)
-    signature_point = add(sig_term1, sig_term2)
-    
-    return {
-        "version": "1.0",
-        "w1": int(challenge),
-        "w2": point_to_json(signature_point),
-        "p1": point_to_json(G1),
-    }
-
-
-def verify_signature_math(vector: list[int], param_a: int, sig_dict: dict) -> tuple[bool, str]:
-    if state.public_key is None:
-        return False, "Nœud crypto non initialisé"
-
-    try:
-        w1 = int(sig_dict["w1"])
-        w2 = json_to_point(sig_dict["w2"])
-        
-        # Vérification par accouplement : R' = w2 - (w1 * P_pub)
-        neg_w1 = (curve_order - (w1 % curve_order)) % curve_order
-        r_point = add(w2, multiply(state.public_key, neg_w1))
-        r_pairing = pairing(G2, r_point)
-        
-        expected_w1 = hash_h2(vector, param_a, r_pairing)
-        if expected_w1 == w1:
-            return True, "Signature Hess-IBS valide"
-        return False, "Échec de correspondance du challenge cryptographique"
-    except Exception as e:
-        return False, f"Erreur de décodage/vérification : {e}"
 
 
 def decode_fragment(fragment_data: str) -> bytes:
     try:
         return base64.b64decode(fragment_data, validate=True)
     except ValueError as error:
-        raise HTTPException(status_code=422, detail="fragment_data doit être du Base64 valide") from error
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="fragment_data doit être du Base64 valide",
+        ) from error
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     configured_scalar = os.environ.get("CRYPTO_SECRET_SCALAR")
-    if configured_scalar:
-        state.secret_scalar = int(configured_scalar)
-    else:
-        # Secret par défaut déterministe pour dev si non fourni, évite changement aléatoire
-        state.secret_scalar = 123456789
-        print("[crypto-node] AVERTISSEMENT : CRYPTO_SECRET_SCALAR non fourni, utilisation du secret par défaut.")
-
-    if not 0 < state.secret_scalar < curve_order:
-        raise RuntimeError("CRYPTO_SECRET_SCALAR doit être compris entre 1 et curve_order - 1")
-        
-    state.public_key = multiply(G1, state.secret_scalar)
-    state.secret_share = state.public_key
-    print(f"[crypto-node] Initialisé avec succès. Clé publique: {point_to_json(state.public_key)}")
+    scalar_val = int(configured_scalar) if configured_scalar else 123456789
+    
+    ts, pk_zone = engine.generate_zone_master_key(scalar_val)
+    state.secret_scalar = ts
+    state.public_key = pk_zone
+    
+    print(f"[{ZONE_ID}] Nœud d'identification & crypto initialisé.")
+    print(f"[{ZONE_ID}] Clé publique de zone (G2) : {engine.g2_to_json(state.public_key)}")
     yield
 
 
-app = FastAPI(title="Pledge Crypto Node", version="1.0.0", lifespan=lifespan)
+app = FastAPI(
+    title=f"Pledge Crypto & Identification Node - {ZONE_ID}",
+    version="2.0.0-fgcs",
+    lifespan=lifespan,
+)
+
+
+# --- MODÈLES DE REQUÊTES ---
+
+class IdentifyRequest(BaseModel):
+    identity: str = Field(..., description="Identifiant unique de l'utilisateur (ex: email)")
+
+
+class AccumulateRequest(BaseModel):
+    shares: list[list[int]] | None = Field(default=None, description="Parts secrètes G1 à accumuler")
+    public_keys: list[list[list[int]]] | None = Field(default=None, description="Clés publiques G2 à accumuler")
 
 
 class FragmentRequest(BaseModel):
-    fragment_data: str = Field(..., description="Fragment encodé en Base64")
-    param_a: int = Field(PARAM_A, alias="paramA")
+    fragment_data: str = Field(..., description="Fragment vidéo encodé en Base64")
+    param_a: dict | None = Field(default=None, alias="paramA")
+
+
+class SignRequest(BaseModel):
+    fragment_data: str | None = Field(default=None, description="Fragment encodé en Base64")
+    v_matrix: list[int] | list[list[int]] | None = Field(default=None, alias="V_matrix")
+    identity: str | None = Field(default=None, description="Identité du signataire (Ow)")
+    secret_key: list[int] | None = Field(default=None, description="Clé secrète Sw [x, y]")
+    param_a: dict | None = Field(default=None, alias="paramA")
 
 
 class VerifyRequest(BaseModel):
-    v_matrix: list[int] = Field(..., alias="V_matrix", description="Vecteur SIS V_matrix")
-    param_a: int = Field(PARAM_A, alias="paramA")
-    signature: dict = Field(..., description="Objet signature Hess-IBS {w1, w2, p1}")
+    v_matrix: list[int] | list[list[int]] = Field(..., alias="V_matrix")
+    param_a: dict | None = Field(default=None, alias="paramA")
+    signature: dict = Field(..., description="Signature Hess-IBS {w1, w2, p1}")
+    owner_id: str | None = Field(default=None, description="Identité du propriétaire (Ow)")
+    zone_pk: list[list[int]] | None = Field(default=None, description="Clé publique de zone accumulée (G2)")
+    is_delegated: bool = Field(default=False, description="Indique s'il s'agit d'une signature déléguée Fog")
+    delegate_id: str | None = Field(default=None, description="Identité du délégué (DSd)")
+    delegate_pk: list[list[int]] | None = Field(default=None, description="Clé publique du délégué (PKd)")
 
+
+class DelegateRequest(BaseModel):
+    owner_secret_key: list[int] | None = Field(default=None, description="Clé secrète du propriétaire Sw")
+    owner_id: str | None = Field(default=None, description="Identité du propriétaire si génération locale")
+    delegate_id: str = Field(..., description="Identité du nœud Fog délégué (ex: Edge_Node_01)")
+
+
+# --- ROUTES PRINCIPALES ---
 
 @app.get("/")
 def read_root() -> dict[str, str]:
-    return {"service": "crypto-node", "status": "ok"}
+    return {"service": "crypto-node", "zone": ZONE_ID, "status": "ok", "spec": "FGCS-2024"}
 
 
 @app.get("/health")
@@ -154,44 +105,173 @@ def health() -> dict:
     return {
         "status": "ok" if is_ready else "not_ready",
         "initialized": is_ready,
+        "zone": ZONE_ID,
         "curve": "bn128",
-        "version": "1.0",
+        "version": "2.0.0-fgcs",
     }
 
 
 @app.get("/api/v1/crypto/parameters")
 def get_crypto_parameters() -> dict:
     if state.public_key is None:
-        raise HTTPException(status_code=503, detail="Le nœud crypto n'est pas initialisé")
+        raise HTTPException(status_code=503, detail="Le serveur crypto n'est pas initialisé")
     return {
         "curve": "bn128",
-        "public_key": point_to_json(state.public_key),
-        "paramA": PARAM_A,
-        "sis": {"l": SIS_L, "m": SIS_M, "q": SIS_Q, "hash": "SHA-256"},
-        "signature": {"scheme": "Hess-IBS", "group": "G1", "version": "1.0"},
+        "zone_id": ZONE_ID,
+        "public_key": engine.g2_to_json(state.public_key),
+        "paramA": engine.DEFAULT_PARAM_A,
+        "sis": {
+            "l": engine.SIS_L,
+            "m": engine.SIS_M,
+            "q": engine.SIS_Q,
+            "hash": "SHA-256",
+            "generator": "L'Ecuyer-1994",
+        },
+        "signature": {
+            "scheme": "Hess-IBS",
+            "group_curve": "alt_bn128",
+            "version": "2.0-fgcs",
+        },
     }
+
+
+@app.post("/api/v1/crypto/identify")
+def identify_owner(request: IdentifyRequest) -> dict:
+    """
+    Serveur d'Identification IS_s (Section 3.4.2) :
+    Calcule et délivre la part secrète S_w^s = ts * H1(ID_w) pour l'identité de l'utilisateur.
+    """
+    if state.secret_scalar is None or state.public_key is None:
+        raise HTTPException(status_code=503, detail="Serveur d'identification non initialisé")
+    
+    secret_share = engine.compute_secret_share(state.secret_scalar, request.identity)
+    return {
+        "identity": request.identity,
+        "zone_id": ZONE_ID,
+        "secret_share": engine.g1_to_json(secret_share),
+        "zone_pk": engine.g2_to_json(state.public_key),
+    }
+
+
+@app.post("/api/v1/crypto/accumulate")
+def accumulate_keys_endpoint(request: AccumulateRequest) -> dict:
+    """
+    Mobilité Multi-Zone (Section 3.4.2 Step 5) :
+    Accumule les parts secrètes Sw = sum(S_w^s) et les clés publiques PK = sum(PK_s).
+    """
+    result = {}
+    if request.shares:
+        g1_shares = [engine.json_to_g1(s) for s in request.shares]
+        sw_accum = engine.accumulate_secret_keys(g1_shares)
+        result["accumulated_secret_key"] = engine.g1_to_json(sw_accum)
+    if request.public_keys:
+        g2_pks = [engine.json_to_g2(pk) for pk in request.public_keys]
+        pk_accum = engine.accumulate_public_keys(g2_pks)
+        result["accumulated_public_key"] = engine.g2_to_json(pk_accum)
+    return result
 
 
 @app.post("/api/v1/crypto/integrity")
 def calculate_integrity(request: FragmentRequest) -> dict:
+    """
+    Calcul de la preuve d'intégrité SIS v_i = (A * x_i) mod q (Section 3.4.3.2).
+    """
     fragment = decode_fragment(request.fragment_data)
-    if request.param_a != PARAM_A:
-        raise HTTPException(status_code=422, detail=f"paramA doit valoir {PARAM_A}")
-    return {"paramA": PARAM_A, "V_matrix": compute_integrity(fragment)}
+    param_a = request.param_a or engine.DEFAULT_PARAM_A
+    v_vector = engine.compute_sis_vector(fragment, param_a)
+    return {
+        "paramA": param_a,
+        "V_matrix": v_vector,
+    }
 
 
 @app.post("/api/v1/crypto/signature")
-def sign_fragment(request: FragmentRequest) -> dict:
-    fragment = decode_fragment(request.fragment_data)
-    if request.param_a != PARAM_A:
-        raise HTTPException(status_code=422, detail=f"paramA doit valoir {PARAM_A}")
-    vector = compute_integrity(fragment)
-    return {"paramA": PARAM_A, "V_matrix": vector, "signature": generate_signature(vector, PARAM_A)}
+def sign_fragment(request: SignRequest) -> dict:
+    """
+    Génération d'une signature Hess-IBS basée sur l'identité (Section 3.4.3.3).
+    """
+    param_a = request.param_a or engine.DEFAULT_PARAM_A
+    
+    if request.fragment_data:
+        fragment = decode_fragment(request.fragment_data)
+        v_vector = engine.compute_sis_vector(fragment, param_a)
+    elif request.v_matrix is not None:
+        v_vector = request.v_matrix
+    else:
+        raise HTTPException(status_code=400, detail="Fournir fragment_data ou V_matrix")
+
+    # Clé secrète Sw
+    if request.secret_key:
+        secret_key = engine.json_to_g1(request.secret_key)
+    elif request.identity and state.secret_scalar:
+        # Émission et signature à la volée pour tests/clients simplifiés
+        secret_key = engine.compute_secret_share(state.secret_scalar, request.identity)
+    elif state.secret_scalar:
+        secret_key = engine.compute_secret_share(state.secret_scalar, f"default@{ZONE_ID.lower()}.pledge")
+    else:
+        raise HTTPException(status_code=503, detail="Clé secrète non disponible")
+
+    signature = engine.sign_data(v_vector, secret_key, param_a)
+    return {
+        "paramA": param_a,
+        "V_matrix": v_vector,
+        "signature": signature,
+    }
 
 
 @app.post("/api/v1/crypto/verify")
-def verify_signature(request: VerifyRequest) -> dict:
-    if request.param_a != PARAM_A:
-        raise HTTPException(status_code=422, detail=f"paramA doit valoir {PARAM_A}")
-    is_valid, reason = verify_signature_math(request.v_matrix, request.param_a, request.signature)
-    return {"valid": is_valid, "detail": reason}
+def verify_signature_endpoint(request: VerifyRequest) -> dict:
+    """
+    Vérification publique Hess-IBS (Section 3.4.4 & 3.6.3).
+    Peut être effectuée par n'importe quel spectateur sans tiers de confiance.
+    """
+    param_a = request.param_a or engine.DEFAULT_PARAM_A
+    zone_pk = request.zone_pk if request.zone_pk else state.public_key
+    if not zone_pk:
+        raise HTTPException(status_code=400, detail="zone_pk requis pour la vérification")
+
+    owner_id = request.owner_id or f"default@{ZONE_ID.lower()}.pledge"
+
+    if request.is_delegated:
+        if not request.delegate_id or not request.delegate_pk:
+            raise HTTPException(status_code=400, detail="delegate_id et delegate_pk requis pour la signature déléguée")
+        is_valid, detail = engine.verify_delegated_signature(
+            v_data=request.v_matrix,
+            sig_dict=request.signature,
+            owner_identity=owner_id,
+            zone_pk=zone_pk,
+            delegate_identity=request.delegate_id,
+            delegate_pk=request.delegate_pk,
+            param_a=param_a,
+        )
+    else:
+        is_valid, detail = engine.verify_signature(
+            v_data=request.v_matrix,
+            sig_dict=request.signature,
+            owner_identity=owner_id,
+            zone_pk=zone_pk,
+            param_a=param_a,
+        )
+
+    return {"valid": is_valid, "detail": detail}
+
+
+@app.post("/api/v1/crypto/delegate")
+def delegate_signing_key(request: DelegateRequest) -> dict:
+    """
+    Génération d'une clé de signature déléguée pour le Fog (Section 3.6.1) :
+      DKd = Sw + y * H1(IDd)
+    """
+    if request.owner_secret_key:
+        sw = engine.json_to_g1(request.owner_secret_key)
+    elif request.owner_id and state.secret_scalar:
+        sw = engine.compute_secret_share(state.secret_scalar, request.owner_id)
+    else:
+        raise HTTPException(status_code=400, detail="owner_secret_key ou owner_id requis")
+
+    dk_d, pk_d = engine.generate_delegation_key(sw, request.delegate_id)
+    return {
+        "delegate_id": request.delegate_id,
+        "delegation_key": engine.g1_to_json(dk_d),
+        "delegate_pk": engine.g2_to_json(pk_d),
+    }

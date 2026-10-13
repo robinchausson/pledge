@@ -1,4 +1,13 @@
 import { useEffect, useState, useRef } from 'react'
+import {
+  computeSisVector,
+  signHessIBS,
+  verifyIncomingBlock,
+  deriveStreamerKey,
+  uint8ArrayToBase64,
+  base64ToUint8Array,
+  DEFAULT_PARAM_A,
+} from './cryptoClient.js'
 
 const API_URL = import.meta.env.VITE_API_URL || ''
 const WS_URL = API_URL
@@ -141,41 +150,89 @@ function Home({ openAuth }) {
 function StreamerInterface({ user }) {
   const [streaming, setStreaming] = useState(false)
   const [chunksSent, setChunksSent] = useState(0)
+  const [edgeNode, setEdgeNode] = useState(null)
   const [ws, setWs] = useState(null)
   const [mediaRecorder, setMediaRecorder] = useState(null)
+  const blockIndexRef = useRef(0)
+  const heartbeatTimerRef = useRef(null)
   const videoRef = useRef()
+  const [streamerKey] = useState(() => deriveStreamerKey(user.email))
 
   async function startStream() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
       if (videoRef.current) videoRef.current.srcObject = stream
-      
-      const socket = new WebSocket(`${WS_URL}/api/stream/publish/${user.email}`)
+
+      // 1. Plan de Signalisation : Allocation du nœud Fog via le backend central
+      const alloc = await apiRequest('/api/stream/allocate', {
+        method: 'POST',
+        body: JSON.stringify({ session_id: user.email }),
+      })
+      setEdgeNode(alloc.edge_node_id)
+
+      // 2. Plan de Données Décentralisé : Connexion WebSocket DIRECTE au nœud Fog (Phase 4)
+      const edgeHost = (alloc.edge_host === '127.0.0.1' || alloc.edge_host === 'localhost')
+        ? window.location.hostname
+        : alloc.edge_host
+      const directUploadUrl = `${alloc.scheme || 'ws'}://${edgeHost}:${alloc.edge_port}/upload/${encodeURIComponent(user.email)}`
+      console.log(`[Streamer] Connexion directe Edge P2P : ${directUploadUrl}`)
+
+      const socket = new WebSocket(directUploadUrl)
+      blockIndexRef.current = 0
+
       socket.onopen = () => {
         setStreaming(true)
         setChunksSent(0)
         const mime = MediaRecorder.isTypeSupported('video/webm; codecs=vp8,opus') ? 'video/webm; codecs=vp8,opus' : 'video/webm'
         const recorderOptions = { mimeType: mime }
         try {
-          // Génération régulière de keyframes (1s) pour un raccord direct immédiat des spectateurs
           recorderOptions.videoKeyFrameIntervalDuration = 1000
         } catch (_) {}
         const recorder = new MediaRecorder(stream, recorderOptions)
-        
+
         recorder.ondataavailable = async (e) => {
           if (e.data.size > 0 && socket.readyState === WebSocket.OPEN) {
-            socket.send(await e.data.arrayBuffer())
+            const buffer = await e.data.arrayBuffer()
+            const chunkBytes = new Uint8Array(buffer)
+            const payloadB64 = uint8ArrayToBase64(chunkBytes)
+            const currentIdx = blockIndexRef.current
+            blockIndexRef.current += 1
+
+            // Signature réelle côté diffuseur Ow (Phase 5 - Section 3.4.3)
+            const paramA = alloc.paramA || DEFAULT_PARAM_A
+            const vColumn = computeSisVector(chunkBytes, paramA)
+            const signature = signHessIBS(vColumn, streamerKey.secretKey, paramA)
+
+            // Paquet complet conforme à l'article scientifique
+            const packet = {
+              block_index: currentIdx,
+              payload_b64: payloadB64,
+              paramA: paramA,
+              V_column: vColumn,
+              signature: signature,
+              signer_id: user.email,
+              zone_pk: streamerKey.zonePk,
+              is_delegated: false,
+            }
+
+            socket.send(JSON.stringify(packet))
             setChunksSent(c => c + 1)
           }
         }
-        // Cadence basse latence à 600ms
+
         recorder.start(600)
         setMediaRecorder(recorder)
+
+        // Heartbeat périodique vers le backend pour maintenir le statut en direct
+        heartbeatTimerRef.current = setInterval(() => {
+          apiRequest(`/api/stream/heartbeat/${encodeURIComponent(user.email)}`, { method: 'POST' }).catch(() => {})
+        }, 8000)
       }
-      
+
       socket.onclose = (e) => {
         console.log('Connexion WSS fermée', e)
         setStreaming(false)
+        if (heartbeatTimerRef.current) clearInterval(heartbeatTimerRef.current)
         if (e.code !== 1000 && e.code !== 1005) {
           alert(`La diffusion s'est arrêtée : ${e.reason || 'Erreur réseau'}`)
         }
@@ -184,18 +241,20 @@ function StreamerInterface({ user }) {
           videoRef.current.srcObject = null
         }
       }
-      
+
       setWs(socket)
     } catch (e) {
-      console.error('Erreur caméra:', e)
-      alert("Erreur d'accès à la caméra")
+      console.error('Erreur démarrage stream:', e)
+      alert("Erreur d'accès à la caméra ou connexion Edge")
     }
   }
 
   function stopStream() {
+    if (heartbeatTimerRef.current) clearInterval(heartbeatTimerRef.current)
     if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop()
     if (ws) ws.close()
     setStreaming(false)
+    apiRequest(`/api/stream/stop/${encodeURIComponent(user.email)}`, { method: 'POST' }).catch(() => {})
     if (videoRef.current && videoRef.current.srcObject) {
       videoRef.current.srcObject.getTracks().forEach(t => t.stop())
       videoRef.current.srcObject = null
@@ -205,10 +264,32 @@ function StreamerInterface({ user }) {
   return (
     <article className="dashboard-card stream-card">
       <div className="card-heading">
-        <div><span className="eyebrow">Studio Edge</span><h2>Votre diffusion</h2></div>
-        <span className="connection-badge"><i style={{background: streaming ? '#22c55e' : '#ef4444'}} /> {streaming ? `En ligne (${chunksSent} blocs)` : 'Hors ligne'}</span>
+        <div><span className="eyebrow">Studio Edge (Owner Ow)</span><h2>Votre diffusion</h2></div>
+        <div style={{display: 'flex', gap: '8px', alignItems: 'center'}}>
+          {streaming && edgeNode && (
+            <span className="connection-badge" style={{background: '#1a2638', color: '#70e8b3'}}>
+              Fog: {edgeNode}
+            </span>
+          )}
+          <span className="connection-badge">
+            <i style={{background: streaming ? '#22c55e' : '#ef4444'}} />
+            {streaming ? `En direct (${chunksSent} blocs signés)` : 'Hors ligne'}
+          </span>
+        </div>
       </div>
       <video ref={videoRef} autoPlay muted style={{width: '100%', background: '#000', borderRadius: '12px', minHeight: '200px'}} />
+      {streaming && (
+        <div style={{marginTop: '0.6rem', display: 'flex', flexDirection: 'column', gap: '6px'}}>
+          <div style={{padding: '6px 10px', borderRadius: '6px', background: 'rgba(34, 197, 94, 0.1)', border: '1px solid rgba(34, 197, 94, 0.3)', fontSize: '11px', color: '#4ade80', display: 'flex', alignItems: 'center', gap: '8px'}}>
+            <span>🔒</span>
+            <span>Cryptographie active : Blocs vérifiables signés avec Hess-IBS (Clé secrète <em>S_w</em> liée à {user.email})</span>
+          </div>
+          <div style={{padding: '6px 10px', borderRadius: '6px', background: 'rgba(56, 189, 248, 0.1)', border: '1px solid rgba(56, 189, 248, 0.3)', fontSize: '11px', color: '#38bdf8', display: 'flex', alignItems: 'center', gap: '8px'}}>
+            <span>⚡</span>
+            <span>Délégation Fog active : Le nœud <strong>{edgeNode || 'Edge'}</strong> peut transcoder légitimement via clé de délégation <em>DK_d</em></span>
+          </div>
+        </div>
+      )}
       <div style={{marginTop: '1rem'}}>
         {streaming ? (
           <button className="button button-quiet" onClick={stopStream}>Arrêter la diffusion</button>
@@ -223,16 +304,38 @@ function StreamerInterface({ user }) {
 function ViewerInterface({ user }) {
   const [streamId, setStreamId] = useState('')
   const [watching, setWatching] = useState(false)
-  const [watchMode, setWatchMode] = useState('live') // 'live' ou 'start'
+  const [watchMode, setWatchMode] = useState('live')
+  const [quality, setQuality] = useState('1080p')
   const [chunksReceived, setChunksReceived] = useState(0)
+  const [connectedNode, setConnectedNode] = useState(null)
   const videoRef = useRef()
   const [ws, setWs] = useState(null)
-  
-  function startWatching(idToWatch, mode = watchMode) {
+
+  // États pour le Tableau de Bord d'Intégrité en Direct (Phase 5)
+  const [auditStatus, setAuditStatus] = useState('idle') // 'idle' | 'intact' | 'delegated' | 'tampered'
+  const [auditMetrics, setAuditMetrics] = useState({
+    sisTimeMs: 0,
+    sigTimeMs: 0,
+    totalTimeMs: 0,
+    verifiedCount: 0,
+    tamperedCount: 0,
+    lastDetail: '',
+  })
+  const [simulateTamper, setSimulateTamper] = useState(false)
+  const simulateTamperRef = useRef(false)
+  const [showInspector, setShowInspector] = useState(false)
+  const [lastPacketData, setLastPacketData] = useState(null)
+
+  function toggleTamperSimulation() {
+    const nextVal = !simulateTamper
+    setSimulateTamper(nextVal)
+    simulateTamperRef.current = nextVal
+  }
+
+  async function startWatching(idToWatch, mode = watchMode, q = quality) {
     const targetId = idToWatch || streamId
     if (!targetId) return
 
-    // Fermeture propre de la session précédente le cas échéant
     if (ws) {
       try {
         ws.close()
@@ -242,126 +345,235 @@ function ViewerInterface({ user }) {
 
     setStreamId(targetId)
     setWatchMode(mode)
+    setQuality(q)
     setWatching(true)
     setChunksReceived(0)
-    
-    const socket = new WebSocket(`${WS_URL}/api/stream/watch/${targetId}?mode=${mode}`)
-    socket.binaryType = "arraybuffer"
-    
-    const mediaSource = new MediaSource()
-    setTimeout(() => {
-      if (videoRef.current) {
-        videoRef.current.src = URL.createObjectURL(mediaSource)
-      }
-    }, 50)
-    
-    mediaSource.addEventListener('sourceopen', () => {
-      const mime = MediaRecorder.isTypeSupported('video/webm; codecs=vp8,opus') ? 'video/webm; codecs=vp8,opus' : 'video/webm'
-      let sourceBuffer
-      try {
-        sourceBuffer = mediaSource.addSourceBuffer(mime)
-      } catch (err) {
-        console.error("Erreur addSourceBuffer:", err)
-        return
-      }
-
-      const queue = []
-      
-      function processQueue() {
-        if (queue.length > 0 && sourceBuffer && !sourceBuffer.updating) {
-          const next = queue.shift()
-          try {
-            sourceBuffer.appendBuffer(next)
-          } catch (e) {
-            console.warn("Erreur buffer append:", e)
-          }
-        }
-      }
-
-      socket.onmessage = (event) => {
-        const chunk = new Uint8Array(event.data)
-        setChunksReceived(c => c + 1)
-        if (sourceBuffer && !sourceBuffer.updating && queue.length === 0) {
-          try {
-            sourceBuffer.appendBuffer(chunk)
-          } catch (e) {
-            queue.push(chunk)
-          }
-        } else {
-          // Limite de taille de file d'attente pour éviter la saturation mémoire
-          if (queue.length < 50) {
-            queue.push(chunk)
-          }
-        }
-
-        // Tentative de lecture automatique
-        if (videoRef.current && videoRef.current.paused) {
-          videoRef.current.play().catch(() => {
-            if (videoRef.current) {
-              videoRef.current.muted = true
-              videoRef.current.play().catch(() => {})
-            }
-          })
-        }
-      }
-      
-      sourceBuffer.addEventListener('updateend', () => {
-        processQueue()
-
-        if (videoRef.current) {
-          // En mode direct : recalage immédiat sur le live edge pour éliminer tout retard
-          if (mode === 'live' && sourceBuffer.buffered.length > 0) {
-            const livePosition = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1)
-            // Si la tête de lecture est restée au début ou a plus de 1.4s de retard sur le direct
-            if (livePosition - videoRef.current.currentTime > 1.4) {
-              videoRef.current.currentTime = Math.max(0, livePosition - 0.3)
-            }
-          }
-
-          // Nettoyage de l'historique lointain si la vidéo tourne depuis longtemps (tampon glissant)
-          if (sourceBuffer.buffered.length > 0 && !sourceBuffer.updating) {
-            const bufferStart = sourceBuffer.buffered.start(0)
-            if (videoRef.current.currentTime - bufferStart > 60) {
-              try {
-                sourceBuffer.remove(bufferStart, videoRef.current.currentTime - 30)
-              } catch (_) {}
-            }
-          }
-
-          if (videoRef.current.paused) {
-            videoRef.current.play().catch(() => {})
-          }
-        }
-      })
+    setAuditStatus('idle')
+    setAuditMetrics({
+      sisTimeMs: 0,
+      sigTimeMs: 0,
+      totalTimeMs: 0,
+      verifiedCount: 0,
+      tamperedCount: 0,
+      lastDetail: '',
     })
 
-    socket.onclose = (e) => {
-      console.log('Connexion WSS fermée', e)
+    try {
+      // 1. Plan d'Annuaire : Découverte du nœud hôte via le backend central
+      const discovery = await apiRequest(`/api/stream/discover/${encodeURIComponent(targetId)}?mode=${mode}&quality=${q}`)
+      setConnectedNode(discovery.edge_node_id)
+
+      // Clé publique de zone par défaut
+      const defaultZonePk = deriveStreamerKey(targetId).zonePk
+
+      // 2. Plan de Données Décentralisé : Connexion directe au nœud Edge (Phase 4)
+      const edgeHost = (discovery.edge_host === '127.0.0.1' || discovery.edge_host === 'localhost')
+        ? window.location.hostname
+        : discovery.edge_host
+      const directDownloadUrl = `${discovery.scheme || 'ws'}://${edgeHost}:${discovery.edge_port}/download/${encodeURIComponent(targetId)}?mode=${mode}&quality=${q}`
+      console.log(`[Viewer] Visionnage direct Edge P2P (Qualité: ${q}) : ${directDownloadUrl}`)
+
+      const socket = new WebSocket(directDownloadUrl)
+      socket.binaryType = "arraybuffer"
+
+      const mediaSource = new MediaSource()
+      setTimeout(() => {
+        if (videoRef.current) {
+          videoRef.current.src = URL.createObjectURL(mediaSource)
+        }
+      }, 50)
+
+      mediaSource.addEventListener('sourceopen', () => {
+        const mime = MediaRecorder.isTypeSupported('video/webm; codecs=vp8,opus') ? 'video/webm; codecs=vp8,opus' : 'video/webm'
+        let sourceBuffer
+        try {
+          sourceBuffer = mediaSource.addSourceBuffer(mime)
+        } catch (err) {
+          console.error("Erreur addSourceBuffer:", err)
+          return
+        }
+
+        const queue = []
+
+        function processQueue() {
+          if (queue.length > 0 && sourceBuffer && !sourceBuffer.updating) {
+            const next = queue.shift()
+            try {
+              sourceBuffer.appendBuffer(next)
+            } catch (e) {
+              console.warn("Erreur buffer append:", e)
+            }
+          }
+        }
+
+        socket.onmessage = async (event) => {
+          let chunk = null
+          let packet = null
+
+          // Support des paquets Phase 4/5 (format JSON avec métadonnées) et binaires bruts
+          if (typeof event.data === 'string') {
+            try {
+              packet = JSON.parse(event.data)
+              if (packet && packet.payload_b64) {
+                chunk = base64ToUint8Array(packet.payload_b64)
+              }
+            } catch (_) {}
+          } else if (event.data instanceof ArrayBuffer) {
+            try {
+              const text = new TextDecoder().decode(event.data)
+              if (text.trim().startsWith('{')) {
+                packet = JSON.parse(text)
+                if (packet && packet.payload_b64) {
+                  chunk = base64ToUint8Array(packet.payload_b64)
+                }
+              }
+            } catch (_) {}
+
+            if (!chunk) {
+              chunk = new Uint8Array(event.data)
+            }
+          }
+
+          if (!chunk) return
+
+          // Simulation d'une altération de trame (Attaque en transit) pour démonstration
+          if (simulateTamperRef.current) {
+            chunk[0] ^= 0x55 // Altération d'octets
+          }
+
+          // VÉRIFICATION D'INTÉGRITÉ CÔTÉ SPECTATEUR (Audit Public sans TPA - Phase 5)
+          if (packet) {
+            setLastPacketData(packet)
+            const audit = verifyIncomingBlock(chunk, packet, defaultZonePk)
+
+            if (!audit.isValid) {
+              // ÉCHEC DE LA PREUVE : corruption ou altération détectée !
+              console.warn(`[Audit Public] ALERTE : ${audit.detail}`)
+              setAuditStatus('tampered')
+              setAuditMetrics(m => ({
+                ...m,
+                tamperedCount: m.tamperedCount + 1,
+                sisTimeMs: audit.sisTimeMs,
+                sigTimeMs: audit.sigTimeMs,
+                totalTimeMs: audit.totalTimeMs,
+                lastDetail: audit.detail,
+              }))
+
+              // Coupure immédiate de la lecture vidéo
+              if (videoRef.current) {
+                videoRef.current.pause()
+              }
+              return // Bloquer l'injection du fragment corrompu dans le buffer vidéo
+            } else {
+              // PREUVE RÉUSSIE : fragment vérifié mathématiquement sans TPA
+              setAuditStatus(audit.isDelegated ? 'delegated' : 'intact')
+              setAuditMetrics(m => ({
+                ...m,
+                verifiedCount: m.verifiedCount + 1,
+                sisTimeMs: audit.sisTimeMs,
+                sigTimeMs: audit.sigTimeMs,
+                totalTimeMs: audit.totalTimeMs,
+                lastDetail: audit.detail,
+              }))
+            }
+          }
+
+          setChunksReceived(c => c + 1)
+          if (sourceBuffer && !sourceBuffer.updating && queue.length === 0) {
+            try {
+              sourceBuffer.appendBuffer(chunk)
+            } catch (e) {
+              queue.push(chunk)
+            }
+          } else {
+            if (queue.length < 50) {
+              queue.push(chunk)
+            }
+          }
+
+          if (videoRef.current && videoRef.current.paused && auditStatus !== 'tampered') {
+            videoRef.current.play().catch(() => {
+              if (videoRef.current) {
+                videoRef.current.muted = true
+                videoRef.current.play().catch(() => {})
+              }
+            })
+          }
+        }
+
+        sourceBuffer.addEventListener('updateend', () => {
+          processQueue()
+
+          if (videoRef.current) {
+            if (mode === 'live' && sourceBuffer.buffered.length > 0) {
+              const livePosition = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1)
+              if (livePosition - videoRef.current.currentTime > 1.4) {
+                videoRef.current.currentTime = Math.max(0, livePosition - 0.3)
+              }
+            }
+
+            if (sourceBuffer.buffered.length > 0 && !sourceBuffer.updating) {
+              const bufferStart = sourceBuffer.buffered.start(0)
+              if (videoRef.current.currentTime - bufferStart > 60) {
+                try {
+                  sourceBuffer.remove(bufferStart, videoRef.current.currentTime - 30)
+                } catch (_) {}
+              }
+            }
+
+            if (videoRef.current.paused && auditStatus !== 'tampered') {
+              videoRef.current.play().catch(() => {})
+            }
+          }
+        })
+      })
+
+      socket.onclose = (e) => {
+        console.log('Connexion WSS fermée', e)
+        setWatching(false)
+      }
+
+      setWs(socket)
+    } catch (err) {
+      console.error('Erreur découverte flux:', err)
+      alert(`Erreur de localisation du flux : ${err.message || err}`)
       setWatching(false)
     }
-    
-    setWs(socket)
   }
 
   function stopWatching() {
     if (ws) ws.close()
     setWatching(false)
+    setAuditStatus('idle')
   }
+
+  const totalAudited = auditMetrics.verifiedCount + auditMetrics.tamperedCount
+  const integrityRate = totalAudited > 0
+    ? ((auditMetrics.verifiedCount / totalAudited) * 100).toFixed(1)
+    : '100.0'
 
   return (
     <article className="dashboard-card stream-card">
       <div className="card-heading">
-        <div><span className="eyebrow">Lecteur Edge</span><h2>Regarder un flux</h2></div>
+        <div><span className="eyebrow">Lecteur Edge & Audit Public (Phase 5)</span><h2>Regarder un flux</h2></div>
         {watching && (
-          <span className="connection-badge">
-            <i style={{background: watchMode === 'live' ? '#22c55e' : '#3b82f6'}} />
-            {watchMode === 'live' ? `Direct (${chunksReceived} blocs)` : `Replay (${chunksReceived} blocs)`}
-          </span>
+          <div style={{display: 'flex', gap: '8px', alignItems: 'center'}}>
+            {connectedNode && (
+              <span className="connection-badge" style={{background: '#1a2638', color: '#70e8b3'}}>
+                Fog: {connectedNode}
+              </span>
+            )}
+            <span className="connection-badge">
+              <i style={{background: watchMode === 'live' ? '#22c55e' : '#3b82f6'}} />
+              {watchMode === 'live' ? `Direct (${chunksReceived} blocs)` : `Replay (${chunksReceived} blocs)`}
+            </span>
+          </div>
         )}
       </div>
+
       {!watching ? (
         <div style={{marginTop: '1rem'}}>
-          <div style={{display: 'flex', gap: '0.6rem', marginBottom: '1.2rem', alignItems: 'center'}}>
+          <div style={{display: 'flex', gap: '0.6rem', marginBottom: '0.8rem', alignItems: 'center'}}>
             <span style={{fontSize: '13px', color: '#8899b8', fontWeight: 500}}>Option de démarrage :</span>
             <button
               type="button"
@@ -380,19 +592,141 @@ function ViewerInterface({ user }) {
               ⏮ Depuis le début
             </button>
           </div>
+
+          <div style={{display: 'flex', gap: '0.6rem', marginBottom: '1.2rem', alignItems: 'center'}}>
+            <span style={{fontSize: '13px', color: '#8899b8', fontWeight: 500}}>Résolution / Qualité :</span>
+            <button
+              type="button"
+              className={`button ${quality === '1080p' ? 'button-primary' : 'button-quiet'}`}
+              style={{padding: '5px 12px', fontSize: '12px'}}
+              onClick={() => setQuality('1080p')}
+            >
+              📺 1080p (Original)
+            </button>
+            <button
+              type="button"
+              className={`button ${quality === '720p' ? 'button-primary' : 'button-quiet'}`}
+              style={{padding: '5px 12px', fontSize: '12px'}}
+              onClick={() => setQuality('720p')}
+            >
+              ⚡ 720p Fog (Délégation Section 3.6)
+            </button>
+          </div>
+
           <h3 style={{marginBottom: '1rem', fontSize: '14px'}}>Flux en direct disponibles</h3>
-          <ActiveStreamsList onSelectStream={(s) => { setStreamId(s); startWatching(s, watchMode) }} />
+          <ActiveStreamsList onSelectStream={(s) => { setStreamId(s); startWatching(s, watchMode, quality) }} />
         </div>
       ) : (
         <>
           <video ref={videoRef} autoPlay controls playsInline style={{width: '100%', background: '#000', borderRadius: '12px', minHeight: '200px', marginTop: '1rem'}} />
+
+          {/* TABLEAU DE BORD D'INTÉGRITÉ EN DIRECT (PHASE 5) */}
+          <section className="integrity-dashboard">
+            <div className="integrity-header">
+              <div className="integrity-title">
+                <span>🛡️</span>
+                <span>Audit Public d'Intégrité en Direct (Sans TPA)</span>
+              </div>
+              <div>
+                {auditStatus === 'intact' && (
+                  <span className="integrity-badge intact">
+                    <span>🟢</span> Intègre (SIS & Hess-IBS validés)
+                  </span>
+                )}
+                {auditStatus === 'delegated' && (
+                  <span className="integrity-badge delegated">
+                    <span>🟡</span> Transcodé Légitime (Délégation 3 accouplements)
+                  </span>
+                )}
+                {auditStatus === 'tampered' && (
+                  <span className="integrity-badge tampered">
+                    <span>🔴</span> Altéré / Corrompu (Échec de la preuve)
+                  </span>
+                )}
+                {auditStatus === 'idle' && (
+                  <span className="integrity-badge verifying">
+                    <span>🔄</span> En attente de preuve
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {/* Bannière d'alerte en cas de corruption détectée */}
+            {auditStatus === 'tampered' && (
+              <div className="integrity-alert-banner">
+                <strong>⚠️ ALERTE SÉCURITÉ : Altération détectée !</strong>
+                <span>{auditMetrics.lastDetail || 'La vérification mathématique du bloc vidéo a échoué. La trame ne correspond pas à la signature de l’émetteur.'}</span>
+                <span>La lecture vidéo a été coupée instantanément par précaution pour préserver l’auditabilité publique.</span>
+              </div>
+            )}
+
+            {/* Grille de métriques de performance cryptographiques */}
+            <div className="integrity-metrics-grid">
+              <div className="integrity-metric-card">
+                <span className="integrity-metric-label">Calcul SIS Local</span>
+                <span className="integrity-metric-value green">{auditMetrics.sisTimeMs.toFixed(2)} ms</span>
+              </div>
+              <div className="integrity-metric-card">
+                <span className="integrity-metric-label">Couplage BN254</span>
+                <span className="integrity-metric-value purple">{auditMetrics.sigTimeMs.toFixed(2)} ms</span>
+              </div>
+              <div className="integrity-metric-card">
+                <span className="integrity-metric-label">Latence d'Audit</span>
+                <span className="integrity-metric-value cyan">{auditMetrics.totalTimeMs.toFixed(2)} ms</span>
+              </div>
+              <div className="integrity-metric-card">
+                <span className="integrity-metric-label">Taux d'Intégrité</span>
+                <span className={`integrity-metric-value ${auditMetrics.tamperedCount > 0 ? 'tampered' : 'green'}`}>{integrityRate}%</span>
+              </div>
+              <div className="integrity-metric-card">
+                <span className="integrity-metric-label">Blocs Audités</span>
+                <span className="integrity-metric-value">{auditMetrics.verifiedCount} vérifiés</span>
+              </div>
+            </div>
+
+            {/* Actions & Simulateur d'attaque interactif */}
+            <div className="integrity-actions">
+              <button
+                type="button"
+                className={`button-attack ${simulateTamper ? 'active' : ''}`}
+                onClick={toggleTamperSimulation}
+                title="Altère un octet du fragment en transit pour tester la réaction du schéma SIS / Hess-IBS"
+              >
+                <span>⚡</span>
+                <span>{simulateTamper ? 'Attaque Active (Octet corrompu en transit)' : 'Simuler une altération de trame (Attaque)'}</span>
+              </button>
+
+              <button
+                type="button"
+                className="button button-quiet button-small"
+                onClick={() => setShowInspector(!showInspector)}
+              >
+                {showInspector ? 'Masquer inspecteur' : '🔍 Inspecteur mathématique'}
+              </button>
+            </div>
+
+            {/* Inspecteur cryptographique détaillé (Section 3.4 de l'article) */}
+            {showInspector && lastPacketData && (
+              <div className="crypto-inspector">
+                <div className="crypto-inspector-title">Paramètres Cryptographiques du Dernier Bloc Audité</div>
+                <div><strong>Diffuseur (Owner ID) :</strong> {lastPacketData.signer_id}</div>
+                <div><strong>Schéma SIS :</strong> q=4099, l=64, m=1536 (L'Ecuyer: I0={lastPacketData.paramA?.I0}, a={lastPacketData.paramA?.a}, C0={lastPacketData.paramA?.C0})</div>
+                <div><strong>Vecteur SIS V (éch.) :</strong> [{Array.isArray(lastPacketData.V_column) ? lastPacketData.V_column.slice(0, 6).join(', ') : ''}...]</div>
+                <div><strong>Signature Hess-IBS w1 :</strong> {lastPacketData.signature?.w1}</div>
+                <div><strong>Signature Point w2 in G1 :</strong> [{Array.isArray(lastPacketData.signature?.w2) ? lastPacketData.signature.w2[0]?.slice(0, 16) : ''}..., ...]</div>
+                <div><strong>Courbe :</strong> Alt-bn128 / BN254 (Accouplement bilinéaire optimal e: G1 × G2 → GT)</div>
+                <div><strong>Type de flux :</strong> {lastPacketData.is_delegated ? `Délégué Fog (${lastPacketData.delegate_id})` : 'Direct Owner (Sans intermédiaire)'}</div>
+              </div>
+            )}
+          </section>
+
           <div style={{marginTop: '1rem', display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center'}}>
             <button className="button button-quiet" onClick={stopWatching}>Arrêter de regarder</button>
             {watchMode === 'live' ? (
               <button
                 className="button button-quiet"
                 title="Reprendre le flux depuis le tout premier bloc enregistré"
-                onClick={() => startWatching(streamId, 'start')}
+                onClick={() => startWatching(streamId, 'start', quality)}
               >
                 ⏮ Revoir depuis le début
               </button>
@@ -400,17 +734,36 @@ function ViewerInterface({ user }) {
               <button
                 className="button button-primary"
                 title="Sauter directement au flux en direct temps réel"
-                onClick={() => startWatching(streamId, 'live')}
+                onClick={() => startWatching(streamId, 'live', quality)}
               >
                 🔴 Rejoindre le direct
               </button>
             )}
+
+            <div style={{display: 'flex', gap: '6px', marginLeft: 'auto', alignItems: 'center'}}>
+              <span style={{fontSize: '11px', color: '#8899b8'}}>Qualité :</span>
+              <button
+                className={`button ${quality === '1080p' ? 'button-primary' : 'button-quiet'}`}
+                style={{padding: '4px 8px', fontSize: '11px'}}
+                onClick={() => startWatching(streamId, watchMode, '1080p')}
+              >
+                1080p
+              </button>
+              <button
+                className={`button ${quality === '720p' ? 'button-primary' : 'button-quiet'}`}
+                style={{padding: '4px 8px', fontSize: '11px'}}
+                onClick={() => startWatching(streamId, watchMode, '720p')}
+              >
+                ⚡ 720p Fog
+              </button>
+            </div>
           </div>
         </>
       )}
     </article>
   )
 }
+
 
 function AdminDashboard({ user }) {
   const [activeTab, setActiveTab] = useState('docker')

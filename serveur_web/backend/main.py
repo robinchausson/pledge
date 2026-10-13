@@ -22,9 +22,9 @@ except ImportError:
     from mqtt_client import start_mqtt, is_mqtt_connected
 
 mqtt_client_instance = None
-import docker
 
 try:
+    import docker
     docker_client = docker.from_env()
 except Exception as e:
     print(f"API Docker locale indisponible : {e}", flush=True)

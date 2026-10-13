@@ -32,6 +32,9 @@ class User(Base):
     email = Column(String, unique=True, index=True, nullable=False)
     hashed_password = Column(String, nullable=False)
     role = Column(String, default="viewer")  # "viewer", "streamer", "admin"
+    current_zone = Column(String, default="Zone_1")
+    secret_share = Column(String, default="")  # Part secrète G1 au format JSON
+    accumulated_pk = Column(String, default="")  # Clé publique combinée G2 au format JSON
 
 
 class EdgeNode(Base):
@@ -54,6 +57,10 @@ class StreamSession(Base):
     node_id = Column(String, ForeignKey("edge_nodes.node_id"), index=True)
     zone_id = Column(String)
     status = Column(String, default="live", index=True)  # "live", "stopped", "failed"
+    owner_pk = Column(String, default="")  # Clé publique G2 de la zone
+    is_delegated = Column(Integer, default=0)
+    delegate_id = Column(String, default="")
+    delegate_pk = Column(String, default="")
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     last_active = Column(DateTime, default=datetime.datetime.utcnow, index=True)
 

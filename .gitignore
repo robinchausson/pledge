@@ -1,64 +1,138 @@
-# Environment variables
+# ==========================================
+# Pledge - .gitignore
+# Protection contre la pollution du dépôt GitHub
+# ==========================================
+
+# --- 1. Variables d'Environnement & Secrets ---
 .env
+.env.*
+*.env
 *.env.local
 broker_et_client/client_mqtt/.env
+serveur_web/.env
 !.env.example
+!**/.env.example
+!*.env.example
 
-# Python
+# --- 2. Dépendances & Builds Frontend / Node.js ---
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+build/
+**/build/
+.dist/
+.vite/
+**/.vite/
+.eslintcache
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# --- 3. Environnements Virtuels & Caches Python ---
 __pycache__/
+**/__pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
+.venv/
+venv/
+ENV/
+env/
+*.egg-info/
+.eggs/
+*.egg
 build/
 develop-eggs/
-dist/
 downloads/
 eggs/
-.eggs/
 lib/
 lib64/
 parts/
 sdist/
 var/
 wheels/
-*.egg-info/
 .installed.cfg
-*.egg
-.venv/
-venv/
-ENV/
+.pytest_cache/
+**/.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
 
-# Node & Frontend
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-lerna-debug.log*
-.dist/
-dist/
-
-# SQLite & Persistent Data
+# --- 4. Bases de Données & Données Persistantes ---
 *.db
+*.sqlite
+*.sqlite3
 *.db-journal
 *.db-wal
 *.db-shm
 data/
-donnees_isolees/
+**/data/
+!data/.gitkeep
+!**/data/.gitkeep
 
-# TLS / Cryptography
+# --- 5. Données de Flux Vidéo & Volumes Stockage Fog ---
+donnees_isolees/
+**/donnees_isolees/
+stockage_isole_*/
+**/stockage_isole_*/
+volumes/
+**/volumes/
+# Fichiers binaires de flux et fragments vidéo
+*.dat
+*.webm
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.ts
+*.h264
+*.h265
+
+# --- 6. Brokers MQTT (Mosquitto) ---
+mosquitto_data/
+**/mosquitto_data/
+mosquitto_log/
+**/mosquitto_log/
+
+# --- 7. Certificats TLS & Clés Privées ---
 certs/
+**/certs/
+!certs/.gitkeep
+!**/certs/.gitkeep
 *.crt
 *.key
 *.pem
+*.pfx
+*.p12
+*.csr
 
-# Mosquitto Data
-mosquitto_data/
+# --- 8. Journaux & Logs Système ---
+*.log
+**/*.log
+logs/
+**/logs/
 
-# IDE / OS
+# --- 9. Fichiers Lourds & Documents Externes ---
+*.pdf
+
+# --- 10. Éditeurs & Systèmes d'Exploitation ---
 .vscode/
-.vscode/settings.json
+**/.vscode/
 .idea/
+**/.idea/
+*.swp
+*.swo
+*~
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
+desktop.ini

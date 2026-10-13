@@ -37,6 +37,18 @@ TLS_KEY_FILE = os.getenv("TLS_KEY_FILE", "")
 # ThreadPool pour les écritures disque asynchrones non bloquantes
 io_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
+# Worker de Transcodage Edge et Re-signature Déléguée (Phase 3)
+try:
+    from edge_transcoder import EdgeTranscoder
+    edge_transcoder = EdgeTranscoder(node_id=NODE_ID, zone_id=ZONE_ID)
+except Exception as _exc:
+    try:
+        from .edge_transcoder import EdgeTranscoder
+        edge_transcoder = EdgeTranscoder(node_id=NODE_ID, zone_id=ZONE_ID)
+    except Exception:
+        edge_transcoder = None
+        print(f"[{NODE_ID}] Avertissement: EdgeTranscoder non initialisé: {_exc}", flush=True)
+
 # Suivi en mémoire des statistiques clients/sessions pour éviter les rescans disque
 session_stats_lock = threading.Lock()
 session_stats = {}  # session_id -> {"blocks": int, "bytes": int, "active": bool}
@@ -153,7 +165,7 @@ async def reception_flux_video(websocket, client_id):
     with session_stats_lock:
         session_stats[clean_id] = {"blocks": 0, "bytes": 0, "active": True}
 
-    print(f"[{NODE_ID}] Nouvelle session d'upload initialisée pour : {clean_id}", flush=True)
+    print(f"[{NODE_ID}] Nouvelle session d'upload direct (Phase 4 P2P) pour : {clean_id}", flush=True)
     loop = asyncio.get_running_loop()
     compteur_bloc = 0
 
@@ -161,20 +173,52 @@ async def reception_flux_video(websocket, client_id):
         async for message in websocket:
             raw_data = message if isinstance(message, bytes) else message.encode('utf-8')
             chunk_size = len(raw_data)
-            chemin_fichier = os.path.join(dossier_client, f"bloc_{compteur_bloc}.dat")
+            bloc_id = compteur_bloc
+
+            # Détection et parsing du paquet de transmission Phase 4
+            try:
+                text_msg = message if isinstance(message, str) else message.decode('utf-8')
+                if text_msg.strip().startswith('{'):
+                    packet_obj = json.loads(text_msg)
+                    if isinstance(packet_obj, dict):
+                        bloc_id = packet_obj.get("block_index", compteur_bloc)
+                        if "payload_b64" in packet_obj:
+                            chunk_size = len(packet_obj["payload_b64"])
+            except Exception:
+                pass
+
+            chemin_fichier = os.path.join(dossier_client, f"bloc_{bloc_id}.dat")
 
             # Délégation de l'écriture disque au ThreadPool pour ne pas bloquer l'event loop
             await loop.run_in_executor(io_executor, write_file_sync, chemin_fichier, raw_data)
 
+            # Phase 3 : Worker de Transcodage Edge et re-signature déléguée (Section 3.6.2)
+            if edge_transcoder:
+                def transcode_and_save_worker(raw_bytes, b_id):
+                    try:
+                        transcoded_res = edge_transcoder.process_and_sign_chunk(
+                            session_id=clean_id,
+                            block_id=b_id,
+                            raw_chunk_payload=raw_bytes,
+                            target_quality="720p",
+                            owner_id=clean_id,
+                        )
+                        trans_path = os.path.join(dossier_client, f"bloc_{b_id}_720p.dat")
+                        write_file_sync(trans_path, json.dumps(transcoded_res).encode("utf-8"))
+                    except Exception as err:
+                        print(f"[{NODE_ID}] Avertissement transcodage bloc {b_id}: {err}", flush=True)
+
+                loop.run_in_executor(io_executor, transcode_and_save_worker, raw_data, bloc_id)
+
             # Mise à jour rapide des statistiques en mémoire
             with session_stats_lock:
                 if clean_id in session_stats:
-                    session_stats[clean_id]["blocks"] = compteur_bloc + 1
+                    session_stats[clean_id]["blocks"] = max(session_stats[clean_id]["blocks"], bloc_id + 1)
                     session_stats[clean_id]["bytes"] += chunk_size
 
-            # Acquittement immédiat
-            await websocket.send(json.dumps({"statut": "ok", "bloc_id": compteur_bloc}))
-            compteur_bloc += 1
+            # Acquittement immédiat au diffuseur
+            await websocket.send(json.dumps({"statut": "ok", "bloc_id": bloc_id}))
+            compteur_bloc = bloc_id + 1
 
     except websockets.exceptions.ConnectionClosed:
         print(f"[{NODE_ID}] Fin de session upload pour : {clean_id}", flush=True)
@@ -184,15 +228,17 @@ async def reception_flux_video(websocket, client_id):
                 session_stats[clean_id]["active"] = False
 
 
-async def envoi_flux_video(websocket, client_id, mode="live"):
+async def envoi_flux_video(websocket, client_id, mode="live", fmt="auto", quality="original"):
     clean_id = sanitize_id(client_id)
     dossier_client = os.path.join(DOSSIER_RACINE_STOCKAGE, clean_id)
+    is_transcoded_req = quality in ("720p", "transcoded", "low")
+    suffix = "_720p" if is_transcoded_req else ""
 
     if not os.path.exists(dossier_client):
         await websocket.close(code=1011, reason="Session introuvable sur ce noeud")
         return
 
-    print(f"[{NODE_ID}] Nouvelle session de lecture (Download, mode={mode}) pour : {clean_id}", flush=True)
+    print(f"[{NODE_ID}] Nouvelle session de lecture directe (Download P2P, mode={mode}, format={fmt}, qualite={quality}) pour : {clean_id}", flush=True)
 
     # Récupération du dernier bloc disponible
     dernier_bloc = 0
@@ -214,15 +260,43 @@ async def envoi_flux_video(websocket, client_id, mode="live"):
 
     BUFFER_INITIAL_BLOCS = 3
 
+    async def envoyer_bloc(data_bytes: bytes):
+        """Envoie le bloc sous forme brute ou JSON selon le format demandé."""
+        if fmt == "raw":
+            try:
+                parsed = json.loads(data_bytes.decode('utf-8'))
+                if isinstance(parsed, dict) and "payload_b64" in parsed:
+                    import base64
+                    await websocket.send(base64.b64decode(parsed["payload_b64"]))
+                    return
+                elif isinstance(parsed, dict) and "chunk_b64" in parsed:
+                    import base64
+                    await websocket.send(base64.b64decode(parsed["chunk_b64"]))
+                    return
+            except Exception:
+                pass
+            await websocket.send(data_bytes)
+        else:
+            # Format par défaut : envoi direct du paquet (JSON ou binaire)
+            try:
+                # Si c'est du texte JSON valide, envoyer comme frame texte WS
+                text = data_bytes.decode('utf-8')
+                await websocket.send(text)
+            except UnicodeDecodeError:
+                await websocket.send(data_bytes)
+
     if mode == "live" and dernier_bloc > BUFFER_INITIAL_BLOCS:
         # En mode live avec historique :
         # 1. Envoi prioritaire du bloc 0 (contenant l'en-tête d'initialisation WebM nécessaire à MSE)
-        chemin_init = os.path.join(dossier_client, "bloc_0.dat")
+        chemin_init = os.path.join(dossier_client, f"bloc_0{suffix}.dat")
+        if not os.path.exists(chemin_init) and suffix:
+            chemin_init = os.path.join(dossier_client, "bloc_0.dat")
+
         if os.path.exists(chemin_init):
             try:
                 with open(chemin_init, "rb") as f:
                     donnees_init = f.read()
-                await websocket.send(donnees_init)
+                await envoyer_bloc(donnees_init)
                 # Court délai d'attente pour acquittement éventuel
                 try:
                     await asyncio.wait_for(websocket.recv(), timeout=0.05)
@@ -243,16 +317,36 @@ async def envoi_flux_video(websocket, client_id, mode="live"):
     MAX_WAIT_SECONDS = 20
 
     while True:
-        chemin_fichier = os.path.join(dossier_client, f"bloc_{compteur_bloc}.dat")
+        chemin_fichier = os.path.join(dossier_client, f"bloc_{compteur_bloc}{suffix}.dat")
+        # Si le bloc transcodé demandé n'est pas encore sur disque, vérifier le bloc original
+        if not os.path.exists(chemin_fichier) and suffix:
+            chemin_orig = os.path.join(dossier_client, f"bloc_{compteur_bloc}.dat")
+            if os.path.exists(chemin_orig) and edge_transcoder:
+                try:
+                    with open(chemin_orig, "rb") as f:
+                        raw_bytes = f.read()
+                    transcoded_res = edge_transcoder.process_and_sign_chunk(
+                        session_id=clean_id,
+                        block_id=compteur_bloc,
+                        raw_chunk_payload=raw_bytes,
+                        target_quality="720p",
+                        owner_id=clean_id,
+                    )
+                    write_file_sync(chemin_fichier, json.dumps(transcoded_res).encode("utf-8"))
+                except Exception as e:
+                    print(f"[{NODE_ID}] Erreur transcodage volée bloc {compteur_bloc}: {e}", flush=True)
+                    chemin_fichier = chemin_orig
+            else:
+                chemin_fichier = chemin_orig
+
         if os.path.exists(chemin_fichier):
             inactivity_counter = 0
             try:
-                loop = asyncio.get_running_loop()
-                # Lecture non bloquante
+                # Lecture du bloc
                 with open(chemin_fichier, "rb") as f:
                     donnees = f.read()
 
-                await websocket.send(donnees)
+                await envoyer_bloc(donnees)
                 compteur_bloc += 1
 
                 # Attente facultative d'acquittement (avec court timeout de 0.1s)
@@ -288,6 +382,8 @@ async def routeur_ws(websocket, path=None):
     parts = clean_path.split("/") if clean_path else []
     query_params = parse_qs(parsed.query)
     mode = query_params.get("mode", ["live"])[0].lower()
+    fmt = query_params.get("format", ["auto"])[0].lower()
+    quality = query_params.get("quality", ["original"])[0].lower()
 
     if len(parts) >= 2:
         action = parts[0].lower()
@@ -302,7 +398,7 @@ async def routeur_ws(websocket, path=None):
     if action == "upload":
         await reception_flux_video(websocket, client_id)
     elif action == "download":
-        await envoi_flux_video(websocket, client_id, mode=mode)
+        await envoi_flux_video(websocket, client_id, mode=mode, fmt=fmt, quality=quality)
     else:
         await websocket.close(code=1011, reason="Action inconnue")
 
