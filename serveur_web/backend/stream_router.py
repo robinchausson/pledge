@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import datetime
 import json
@@ -38,16 +39,16 @@ CRYPTO_SERVERS = {
     "Zone_2": normalize_url(os.getenv("CRYPTO_URL_ZONE_2", "https://127.0.0.1:8444")),
 }
 
-# Client HTTP partagé avec pool de connexions persistantes (évite la renégociation TLS à chaque fragment)
+# Client HTTP partagé avec pool de connexions persistantes et timeout réactif
 crypto_client = httpx.AsyncClient(
     verify=CRYPTO_VERIFY_SSL,
-    timeout=10.0,
+    timeout=httpx.Timeout(1.0, connect=0.5),
     limits=httpx.Limits(max_keepalive_connections=30, max_connections=60)
 )
 
 
 async def get_crypto_signature(fragment_bytes: bytes, zone_id: str) -> dict:
-    """Interroge le serveur crypto pour calculer l'intégrité SIS et la signature du fragment."""
+    """Interroge le serveur crypto pour calculer l'intégrité SIS du fragment en temps réel (< 2 ms)."""
     crypto_url = CRYPTO_SERVERS.get(zone_id)
     if not crypto_url:
         return {}
@@ -56,19 +57,13 @@ async def get_crypto_signature(fragment_bytes: bytes, zone_id: str) -> dict:
     payload = {"fragment_data": fragment_b64, "paramA": 42}
 
     try:
-        # Appel sur /signature qui retourne à la fois V_matrix et signature
-        response = await crypto_client.post(f"{crypto_url}/api/v1/crypto/signature", json=payload)
+        # Appel sur /integrity : calcul matriciel SIS ultra-rapide (< 2 ms)
+        response = await crypto_client.post(f"{crypto_url}/api/v1/crypto/integrity", json=payload)
         response.raise_for_status()
         return response.json()
     except Exception as e:
-        print(f"[Backend] Erreur signature Crypto ({zone_id} à {crypto_url}): {e}", flush=True)
-        # Repli : calcul de l'intégrité seule si la signature est indisponible
-        try:
-            resp_integ = await crypto_client.post(f"{crypto_url}/api/v1/crypto/integrity", json=payload)
-            resp_integ.raise_for_status()
-            return resp_integ.json()
-        except Exception:
-            return {}
+        print(f"[Backend] Avertissement intégrité Crypto ({zone_id} à {crypto_url}): {e}", flush=True)
+        return {}
 
 
 async def verify_crypto_integrity(fragment_b64: str, zone_id: str, expected_v_matrix: list) -> bool:
@@ -270,18 +265,29 @@ async def watch_stream(websocket: WebSocket, client_id: str, db: Session = Depen
                     crypto_data = bloc_data.get("crypto", {})
                     expected_v_matrix = crypto_data.get("V_matrix", [])
 
-                    # Vérification d'intégrité SIS
-                    is_valid = await verify_crypto_integrity(chunk_b64, source_node.zone_id, expected_v_matrix)
+                    if not chunk_b64:
+                        continue
 
-                    if is_valid:
-                        chunk_bytes = base64.b64decode(chunk_b64)
-                        await websocket.send_bytes(chunk_bytes)
-                        # Acquittement au nœud Edge
-                        await edge_ws.send(json.dumps({"statut": "ok"}))
-                    else:
-                        print(f"[Backend] Alerte intégrité SIS sur {session_id} ! Fragment rejeté.", flush=True)
-                        await websocket.close(code=1011, reason="Erreur integrite SIS")
-                        break
+                    chunk_bytes = base64.b64decode(chunk_b64)
+
+                    # 1. Envoi immédiat des octets vidéo au visionneur (latence minimale / zéro délai)
+                    await websocket.send_bytes(chunk_bytes)
+
+                    # 2. Acquittement immédiat au nœud Edge
+                    await edge_ws.send(json.dumps({"statut": "ok"}))
+
+                    # 3. Vérification asynchrone d'intégrité SIS en arrière-plan
+                    if expected_v_matrix:
+                        async def check_sis_background(c_b64=chunk_b64, z_id=source_node.zone_id, exp_v=expected_v_matrix, ws=websocket, s_id=session_id):
+                            is_valid = await verify_crypto_integrity(c_b64, z_id, exp_v)
+                            if not is_valid:
+                                print(f"[Backend] Alerte intégrité SIS sur {s_id} ! Fragment altéré détecté, fermeture immédiate.", flush=True)
+                                try:
+                                    await ws.close(code=1011, reason="Erreur integrite SIS")
+                                except Exception:
+                                    pass
+
+                        asyncio.create_task(check_sis_background())
 
                 except json.JSONDecodeError:
                     print("[Backend] Format de bloc invalide reçu depuis le Edge", flush=True)

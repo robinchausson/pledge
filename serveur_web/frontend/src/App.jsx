@@ -288,8 +288,12 @@ function ViewerInterface({ user }) {
         }
       }
       
-      sourceBuffer.addEventListener('updateend', processQueue)
-    })
+      sourceBuffer.addEventListener('updateend', () => {
+        processQueue()
+        if (videoRef.current && videoRef.current.paused) {
+          videoRef.current.play().catch(() => {})
+        }
+      })
     
     socket.onclose = (e) => {
       console.log('Connexion WSS fermée', e)

@@ -209,9 +209,9 @@ async def envoi_flux_video(websocket, client_id):
                 await websocket.send(donnees)
                 compteur_bloc += 1
 
-                # Attente facultative d'acquittement (avec timeout)
+                # Attente facultative d'acquittement (avec court timeout de 0.1s)
                 try:
-                    await asyncio.wait_for(websocket.recv(), timeout=5.0)
+                    await asyncio.wait_for(websocket.recv(), timeout=0.1)
                 except asyncio.TimeoutError:
                     pass
 
@@ -222,9 +222,9 @@ async def envoi_flux_video(websocket, client_id):
                 print(f"[{NODE_ID}] Erreur lecture bloc: {e}", flush=True)
                 break
         else:
-            # Vérifier si la session est encore active ou fermée
-            await asyncio.sleep(0.3)
-            inactivity_counter += 0.3
+            # Vérifier si la session est encore active ou fermée (polling rapide à 100ms)
+            await asyncio.sleep(0.1)
+            inactivity_counter += 0.1
             if inactivity_counter >= MAX_WAIT_SECONDS:
                 print(f"[{NODE_ID}] Timeout inactivité flux pour {clean_id}. Fermeture lecture.", flush=True)
                 try:
