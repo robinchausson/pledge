@@ -294,7 +294,8 @@ function ViewerInterface({ user }) {
           videoRef.current.play().catch(() => {})
         }
       })
-    
+    })
+
     socket.onclose = (e) => {
       console.log('Connexion WSS fermée', e)
       setWatching(false)
