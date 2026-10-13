@@ -4,3 +4,4 @@ __pycache__/
 serveur_web/frontend/dist/
 .env
 *.key
+.vscode/settings.json
