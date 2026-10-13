@@ -155,7 +155,12 @@ function StreamerInterface({ user }) {
         setStreaming(true)
         setChunksSent(0)
         const mime = MediaRecorder.isTypeSupported('video/webm; codecs=vp8,opus') ? 'video/webm; codecs=vp8,opus' : 'video/webm'
-        const recorder = new MediaRecorder(stream, { mimeType: mime })
+        const recorderOptions = { mimeType: mime }
+        try {
+          // Génération régulière de keyframes (1s) pour un raccord direct immédiat des spectateurs
+          recorderOptions.videoKeyFrameIntervalDuration = 1000
+        } catch (_) {}
+        const recorder = new MediaRecorder(stream, recorderOptions)
         
         recorder.ondataavailable = async (e) => {
           if (e.data.size > 0 && socket.readyState === WebSocket.OPEN) {
@@ -218,17 +223,29 @@ function StreamerInterface({ user }) {
 function ViewerInterface({ user }) {
   const [streamId, setStreamId] = useState('')
   const [watching, setWatching] = useState(false)
+  const [watchMode, setWatchMode] = useState('live') // 'live' ou 'start'
   const [chunksReceived, setChunksReceived] = useState(0)
   const videoRef = useRef()
   const [ws, setWs] = useState(null)
   
-  function startWatching(idToWatch) {
+  function startWatching(idToWatch, mode = watchMode) {
     const targetId = idToWatch || streamId
     if (!targetId) return
+
+    // Fermeture propre de la session précédente le cas échéant
+    if (ws) {
+      try {
+        ws.close()
+      } catch (_) {}
+      setWs(null)
+    }
+
+    setStreamId(targetId)
+    setWatchMode(mode)
     setWatching(true)
     setChunksReceived(0)
     
-    const socket = new WebSocket(`${WS_URL}/api/stream/watch/${targetId}`)
+    const socket = new WebSocket(`${WS_URL}/api/stream/watch/${targetId}?mode=${mode}`)
     socket.binaryType = "arraybuffer"
     
     const mediaSource = new MediaSource()
@@ -290,8 +307,30 @@ function ViewerInterface({ user }) {
       
       sourceBuffer.addEventListener('updateend', () => {
         processQueue()
-        if (videoRef.current && videoRef.current.paused) {
-          videoRef.current.play().catch(() => {})
+
+        if (videoRef.current) {
+          // En mode direct : recalage immédiat sur le live edge pour éliminer tout retard
+          if (mode === 'live' && sourceBuffer.buffered.length > 0) {
+            const livePosition = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1)
+            // Si la tête de lecture est restée au début ou a plus de 1.4s de retard sur le direct
+            if (livePosition - videoRef.current.currentTime > 1.4) {
+              videoRef.current.currentTime = Math.max(0, livePosition - 0.3)
+            }
+          }
+
+          // Nettoyage de l'historique lointain si la vidéo tourne depuis longtemps (tampon glissant)
+          if (sourceBuffer.buffered.length > 0 && !sourceBuffer.updating) {
+            const bufferStart = sourceBuffer.buffered.start(0)
+            if (videoRef.current.currentTime - bufferStart > 60) {
+              try {
+                sourceBuffer.remove(bufferStart, videoRef.current.currentTime - 30)
+              } catch (_) {}
+            }
+          }
+
+          if (videoRef.current.paused) {
+            videoRef.current.play().catch(() => {})
+          }
         }
       })
     })
@@ -313,18 +352,59 @@ function ViewerInterface({ user }) {
     <article className="dashboard-card stream-card">
       <div className="card-heading">
         <div><span className="eyebrow">Lecteur Edge</span><h2>Regarder un flux</h2></div>
-        {watching && <span className="connection-badge"><i style={{background: '#22c55e'}} /> Direct ({chunksReceived} blocs)</span>}
+        {watching && (
+          <span className="connection-badge">
+            <i style={{background: watchMode === 'live' ? '#22c55e' : '#3b82f6'}} />
+            {watchMode === 'live' ? `Direct (${chunksReceived} blocs)` : `Replay (${chunksReceived} blocs)`}
+          </span>
+        )}
       </div>
       {!watching ? (
         <div style={{marginTop: '1rem'}}>
-          <h3 style={{marginBottom: '1rem', fontSize: '14px'}}>Flux en direct</h3>
-          <ActiveStreamsList onSelectStream={(s) => { setStreamId(s); startWatching(s) }} />
+          <div style={{display: 'flex', gap: '0.6rem', marginBottom: '1.2rem', alignItems: 'center'}}>
+            <span style={{fontSize: '13px', color: '#8899b8', fontWeight: 500}}>Option de démarrage :</span>
+            <button
+              type="button"
+              className={`button ${watchMode === 'live' ? 'button-primary' : 'button-quiet'}`}
+              style={{padding: '5px 12px', fontSize: '12px'}}
+              onClick={() => setWatchMode('live')}
+            >
+              🔴 En direct
+            </button>
+            <button
+              type="button"
+              className={`button ${watchMode === 'start' ? 'button-primary' : 'button-quiet'}`}
+              style={{padding: '5px 12px', fontSize: '12px'}}
+              onClick={() => setWatchMode('start')}
+            >
+              ⏮ Depuis le début
+            </button>
+          </div>
+          <h3 style={{marginBottom: '1rem', fontSize: '14px'}}>Flux en direct disponibles</h3>
+          <ActiveStreamsList onSelectStream={(s) => { setStreamId(s); startWatching(s, watchMode) }} />
         </div>
       ) : (
         <>
           <video ref={videoRef} autoPlay controls playsInline style={{width: '100%', background: '#000', borderRadius: '12px', minHeight: '200px', marginTop: '1rem'}} />
-          <div style={{marginTop: '1rem'}}>
+          <div style={{marginTop: '1rem', display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center'}}>
             <button className="button button-quiet" onClick={stopWatching}>Arrêter de regarder</button>
+            {watchMode === 'live' ? (
+              <button
+                className="button button-quiet"
+                title="Reprendre le flux depuis le tout premier bloc enregistré"
+                onClick={() => startWatching(streamId, 'start')}
+              >
+                ⏮ Revoir depuis le début
+              </button>
+            ) : (
+              <button
+                className="button button-primary"
+                title="Sauter directement au flux en direct temps réel"
+                onClick={() => startWatching(streamId, 'live')}
+              >
+                🔴 Rejoindre le direct
+              </button>
+            )}
           </div>
         </>
       )}

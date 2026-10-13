@@ -226,10 +226,12 @@ async def publish_stream(websocket: WebSocket, client_id: str, db: Session = Dep
 
 
 @router.websocket("/api/stream/watch/{client_id}")
-async def watch_stream(websocket: WebSocket, client_id: str, db: Session = Depends(get_db)):
+async def watch_stream(websocket: WebSocket, client_id: str, mode: str = "live", db: Session = Depends(get_db)):
     await websocket.accept()
     session_id = client_id.strip()
-    print(f"[Visionneur] Demande de visionnage pour : {session_id}", flush=True)
+    req_mode = (websocket.query_params.get("mode") or mode or "live").lower().strip()
+    stream_mode = req_mode if req_mode in ("live", "start", "replay") else "live"
+    print(f"[Visionneur] Demande de visionnage pour : {session_id} (mode={stream_mode})", flush=True)
 
     # 1. Recherche de la session ou de l'emplacement des données
     session = db.query(StreamSession).filter(StreamSession.session_id == session_id).first()
@@ -251,7 +253,7 @@ async def watch_stream(websocket: WebSocket, client_id: str, db: Session = Depen
         return
 
     # 2. Connexion au nœud Edge pour download
-    edge_ws_url = f"{EDGE_WS_SCHEME}://{source_node.ip_address}:{source_node.wss_port}/download/{session_id}"
+    edge_ws_url = f"{EDGE_WS_SCHEME}://{source_node.ip_address}:{source_node.wss_port}/download/{session_id}?mode={stream_mode}"
 
     try:
         async with websockets.connect(edge_ws_url, max_size=None, ping_timeout=60, ping_interval=20) as edge_ws:

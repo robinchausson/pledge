@@ -10,6 +10,7 @@ import threading
 import time
 import websockets
 import paho.mqtt.client as mqtt
+from urllib.parse import urlparse, parse_qs
 
 # --- CONFIGURATION RÉSEAU & IDENTITÉ ---
 NODE_ID = os.getenv("NODE_ID", "Edge_Node_01")
@@ -183,7 +184,7 @@ async def reception_flux_video(websocket, client_id):
                 session_stats[clean_id]["active"] = False
 
 
-async def envoi_flux_video(websocket, client_id):
+async def envoi_flux_video(websocket, client_id, mode="live"):
     clean_id = sanitize_id(client_id)
     dossier_client = os.path.join(DOSSIER_RACINE_STOCKAGE, clean_id)
 
@@ -191,8 +192,53 @@ async def envoi_flux_video(websocket, client_id):
         await websocket.close(code=1011, reason="Session introuvable sur ce noeud")
         return
 
-    print(f"[{NODE_ID}] Nouvelle session de lecture (Download) pour : {clean_id}", flush=True)
-    compteur_bloc = 0
+    print(f"[{NODE_ID}] Nouvelle session de lecture (Download, mode={mode}) pour : {clean_id}", flush=True)
+
+    # Récupération du dernier bloc disponible
+    dernier_bloc = 0
+    with session_stats_lock:
+        if clean_id in session_stats:
+            dernier_bloc = max(0, session_stats[clean_id].get("blocks", 0) - 1)
+
+    if dernier_bloc == 0 and os.path.exists(dossier_client):
+        try:
+            bloc_files = [
+                int(f.split("_")[1].split(".")[0])
+                for f in os.listdir(dossier_client)
+                if f.startswith("bloc_") and f.endswith(".dat") and f.split("_")[1].split(".")[0].isdigit()
+            ]
+            if bloc_files:
+                dernier_bloc = max(bloc_files)
+        except Exception:
+            pass
+
+    BUFFER_INITIAL_BLOCS = 3
+
+    if mode == "live" and dernier_bloc > BUFFER_INITIAL_BLOCS:
+        # En mode live avec historique :
+        # 1. Envoi prioritaire du bloc 0 (contenant l'en-tête d'initialisation WebM nécessaire à MSE)
+        chemin_init = os.path.join(dossier_client, "bloc_0.dat")
+        if os.path.exists(chemin_init):
+            try:
+                with open(chemin_init, "rb") as f:
+                    donnees_init = f.read()
+                await websocket.send(donnees_init)
+                # Court délai d'attente pour acquittement éventuel
+                try:
+                    await asyncio.wait_for(websocket.recv(), timeout=0.05)
+                except asyncio.TimeoutError:
+                    pass
+            except Exception as e:
+                print(f"[{NODE_ID}] Erreur envoi bloc initial WebM: {e}", flush=True)
+
+        # 2. Démarrage directement sur les blocs récents (tampon glissant de 3 blocs)
+        compteur_bloc = max(1, dernier_bloc - BUFFER_INITIAL_BLOCS)
+        print(f"[{NODE_ID}] Diffusion Live {clean_id} : amorçage au bloc {compteur_bloc} (dernier={dernier_bloc})", flush=True)
+    else:
+        # Mode replay / début du flux
+        compteur_bloc = 0
+        print(f"[{NODE_ID}] Lecture {clean_id} : démarrage depuis le début (bloc 0)", flush=True)
+
     inactivity_counter = 0
     MAX_WAIT_SECONDS = 20
 
@@ -222,9 +268,9 @@ async def envoi_flux_video(websocket, client_id):
                 print(f"[{NODE_ID}] Erreur lecture bloc: {e}", flush=True)
                 break
         else:
-            # Vérifier si la session est encore active ou fermée (polling rapide à 100ms)
-            await asyncio.sleep(0.1)
-            inactivity_counter += 0.1
+            # Vérifier si la session est encore active ou fermée (polling rapide à 50ms)
+            await asyncio.sleep(0.05)
+            inactivity_counter += 0.05
             if inactivity_counter >= MAX_WAIT_SECONDS:
                 print(f"[{NODE_ID}] Timeout inactivité flux pour {clean_id}. Fermeture lecture.", flush=True)
                 try:
@@ -237,7 +283,11 @@ async def envoi_flux_video(websocket, client_id):
 async def routeur_ws(websocket, path=None):
     # Support de la compatibilité websockets version 11 et 14+
     request_path = getattr(websocket, "path", path) or ""
-    parts = request_path.strip("/").split("/")
+    parsed = urlparse(request_path)
+    clean_path = parsed.path.strip("/")
+    parts = clean_path.split("/") if clean_path else []
+    query_params = parse_qs(parsed.query)
+    mode = query_params.get("mode", ["live"])[0].lower()
 
     if len(parts) >= 2:
         action = parts[0].lower()
@@ -252,7 +302,7 @@ async def routeur_ws(websocket, path=None):
     if action == "upload":
         await reception_flux_video(websocket, client_id)
     elif action == "download":
-        await envoi_flux_video(websocket, client_id)
+        await envoi_flux_video(websocket, client_id, mode=mode)
     else:
         await websocket.close(code=1011, reason="Action inconnue")
 
