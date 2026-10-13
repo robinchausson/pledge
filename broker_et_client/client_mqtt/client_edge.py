@@ -134,7 +134,12 @@ async def envoi_flux_video(websocket, client_id):
             # Le bloc n'existe pas encore (attente du direct ou fin du flux)
             await asyncio.sleep(0.5)
 
-async def routeur_wss(websocket, path):
+async def routeur_wss(websocket, path=None):
+    # websockets 11 fournit `path`, tandis que les versions récentes le
+    # portent sur la connexion. Cette compatibilité évite un serveur muet
+    # après une mise à jour de dépendance.
+    if path is None:
+        path = websocket.path
     parts = path.strip("/").split("/")
     if len(parts) >= 2:
         action = parts[0]

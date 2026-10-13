@@ -91,9 +91,18 @@ function ActiveStreamsList({ onSelectStream }) {
   const [streams, setStreams] = useState([])
   
   useEffect(() => {
-    apiRequest('/api/streams/active').then(data => {
-      if (data.streams) setStreams(data.streams)
+    let cancelled = false
+    const loadStreams = () => apiRequest('/api/streams/active').then(data => {
+      if (!cancelled && data.streams) setStreams(data.streams)
+    }).catch(() => {
+      if (!cancelled) setStreams([])
     })
+    loadStreams()
+    const interval = window.setInterval(loadStreams, 3000)
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+    }
   }, [])
 
   if (streams.length === 0) return <p style={{color: '#888'}}>Aucun flux en direct actuellement.</p>
@@ -109,7 +118,7 @@ function ActiveStreamsList({ onSelectStream }) {
   )
 }
 
-function Home({ openAuth }) {
+function Home({ openAuth, onSelectStream }) {
   return (
     <section className="hero" id="top" style={{display: 'flex', flexDirection: 'column', justifyContent: 'center', textAlign: 'center', minHeight: '75vh'}}>
       <div className="hero-copy" style={{maxWidth: '800px', margin: '0 auto'}}>
@@ -123,7 +132,7 @@ function Home({ openAuth }) {
         <div style={{marginTop: '60px'}}>
           <h3 style={{marginBottom: '1rem', color: '#8899b8', fontSize: '12px', textTransform: 'uppercase', letterSpacing: '2px'}}>En direct sur Pledge</h3>
           <div style={{display: 'flex', justifyContent: 'center'}}>
-            <ActiveStreamsList onSelectStream={(s) => openAuth('login')} />
+            <ActiveStreamsList onSelectStream={onSelectStream} />
           </div>
         </div>
       </div>
@@ -204,11 +213,22 @@ function StreamerInterface({ user }) {
   )
 }
 
-function ViewerInterface({ user }) {
+function ViewerInterface({ user, initialStream }) {
   const [streamId, setStreamId] = useState('')
   const [watching, setWatching] = useState(false)
   const videoRef = useRef()
   const [ws, setWs] = useState(null)
+  const mediaSourceRef = useRef(null)
+  const mediaSourceUrlRef = useRef(null)
+  const sourceBufferRef = useRef(null)
+  const queueRef = useRef([])
+
+  useEffect(() => {
+    if (initialStream) {
+      setStreamId(initialStream)
+      startWatching(initialStream)
+    }
+  }, [initialStream])
   
   function startWatching(idToWatch) {
     const targetId = idToWatch || streamId
@@ -217,35 +237,40 @@ function ViewerInterface({ user }) {
     
     const socket = new WebSocket(`${WS_URL}/api/stream/watch/${targetId}`)
     socket.binaryType = "arraybuffer"
-    
+
     const mediaSource = new MediaSource()
-    // Needs a slight delay for react to mount video ref if we just toggled watching
-    setTimeout(() => {
-      if (videoRef.current) {
-        videoRef.current.src = URL.createObjectURL(mediaSource)
+    mediaSourceRef.current = mediaSource
+    queueRef.current = []
+    window.setTimeout(() => {
+      if (videoRef.current && mediaSourceRef.current === mediaSource) {
+        const url = URL.createObjectURL(mediaSource)
+        mediaSourceUrlRef.current = url
+        videoRef.current.src = url
       }
-    }, 50)
-    
+    }, 0)
+
+    const appendNext = () => {
+      const sourceBuffer = sourceBufferRef.current
+      if (!sourceBuffer || sourceBuffer.updating || queueRef.current.length === 0) return
+      sourceBuffer.appendBuffer(queueRef.current.shift())
+    }
+
+    socket.onmessage = (event) => {
+      queueRef.current.push(new Uint8Array(event.data))
+      appendNext()
+    }
+
     mediaSource.addEventListener('sourceopen', () => {
-      const mime = MediaRecorder.isTypeSupported('video/webm; codecs=vp8,opus') ? 'video/webm; codecs=vp8,opus' : 'video/webm'
-      const sourceBuffer = mediaSource.addSourceBuffer(mime)
-      const queue = []
-      
-      socket.onmessage = (event) => {
-        const chunk = new Uint8Array(event.data)
-        if (!sourceBuffer.updating && queue.length === 0) {
-          sourceBuffer.appendBuffer(chunk)
-        } else {
-          queue.push(chunk)
-        }
+      const mime = 'video/webm; codecs="vp8,opus"'
+      if (!MediaSource.isTypeSupported(mime)) {
+        socket.close(1011, 'Format vidéo WebM non supporté par ce navigateur')
+        return
       }
-      
-      sourceBuffer.addEventListener('updateend', () => {
-        if (queue.length > 0 && !sourceBuffer.updating) {
-          sourceBuffer.appendBuffer(queue.shift())
-        }
-      })
-    })
+      const sourceBuffer = mediaSource.addSourceBuffer(mime)
+      sourceBufferRef.current = sourceBuffer
+      sourceBuffer.addEventListener('updateend', appendNext)
+      appendNext()
+    }, { once: true })
     
     socket.onclose = (e) => {
       console.log('Connexion WSS fermée', e)
@@ -257,6 +282,18 @@ function ViewerInterface({ user }) {
 
   function stopWatching() {
     if (ws) ws.close()
+    if (videoRef.current) {
+      videoRef.current.pause()
+      videoRef.current.removeAttribute('src')
+      videoRef.current.load()
+    }
+    if (mediaSourceUrlRef.current) {
+      URL.revokeObjectURL(mediaSourceUrlRef.current)
+      mediaSourceUrlRef.current = null
+    }
+    mediaSourceRef.current = null
+    sourceBufferRef.current = null
+    queueRef.current = []
     setWatching(false)
   }
 
@@ -393,11 +430,11 @@ function AdminDashboard({ user }) {
   )
 }
 
-function Dashboard({ user, onLogout }) {
+function Dashboard({ user, initialStream, onLogout }) {
   return (
     <section className="dashboard">
       <div className="dashboard-grid">
-        {user.role === 'admin' ? <AdminDashboard user={user} /> : user.role === 'streamer' ? <StreamerInterface user={user} /> : <ViewerInterface user={user} />}
+        {user.role === 'admin' ? <AdminDashboard user={user} /> : user.role === 'streamer' ? <StreamerInterface user={user} /> : <ViewerInterface user={user} initialStream={initialStream} />}
         {user.role !== 'admin' && (
           <aside className="dashboard-card profile-card">
           <span className="avatar">{user.email?.charAt(0).toUpperCase()}</span>
@@ -417,6 +454,7 @@ function Dashboard({ user, onLogout }) {
 export default function App() {
   const [authMode, setAuthMode] = useState(null)
   const [user, setUser] = useState(null)
+  const [pendingStream, setPendingStream] = useState('')
 
   useEffect(() => {
     apiRequest('/auth/me')
@@ -426,5 +464,10 @@ export default function App() {
 
   async function logout() { try { await apiRequest('/auth/logout', { method: 'POST' }) } finally { setUser(null) } }
 
-  return <div className="app-shell"><div className="ambient ambient-blue" /><div className="ambient ambient-violet" /><header className="site-header"><Logo /><nav>{user ? <button className="nav-account" type="button" onClick={logout}>Quitter l’espace</button> : <><button className="nav-login" type="button" onClick={() => setAuthMode('login')}>Se connecter</button><button className="button button-primary button-small" type="button" onClick={() => setAuthMode('register')}>Créer un compte</button></>}</nav></header><main>{user ? <Dashboard user={user} onLogout={logout} /> : <Home openAuth={setAuthMode} />}</main>{authMode && <AuthDialog mode={authMode} setMode={setAuthMode} onSuccess={(nextUser) => { setUser(nextUser); setAuthMode(null) }} onClose={() => setAuthMode(null)} />}</div>
+  function selectStream(streamId) {
+    setPendingStream(streamId)
+    setAuthMode('login')
+  }
+
+  return <div className="app-shell"><div className="ambient ambient-blue" /><div className="ambient ambient-violet" /><header className="site-header"><Logo /><nav>{user ? <button className="nav-account" type="button" onClick={logout}>Quitter l’espace</button> : <><button className="nav-login" type="button" onClick={() => setAuthMode('login')}>Se connecter</button><button className="button button-primary button-small" type="button" onClick={() => setAuthMode('register')}>Créer un compte</button></>}</nav></header><main>{user ? <Dashboard user={user} initialStream={pendingStream} onLogout={logout} /> : <Home openAuth={setAuthMode} onSelectStream={selectStream} />}</main>{authMode && <AuthDialog mode={authMode} setMode={setAuthMode} onSuccess={(nextUser) => { setUser(nextUser); setAuthMode(null) }} onClose={() => setAuthMode(null)} />}</div>
 }

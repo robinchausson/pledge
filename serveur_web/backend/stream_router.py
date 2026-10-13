@@ -11,6 +11,11 @@ except ImportError:
 import os
 
 router = APIRouter()
+active_streams: set[str] = set()
+
+
+def get_active_streams() -> list[str]:
+    return sorted(active_streams)
 
 # Dictionnaire de configuration des serveurs crypto par zone
 CRYPTO_SERVERS = {
@@ -50,6 +55,8 @@ async def publish_stream(websocket: WebSocket, client_id: str, db: Session = Dep
         print("[Backend] Aucun noeud Edge disponible dans la DB.")
         await websocket.close(code=1011, reason="Aucun noeud Edge disponible")
         return
+
+    active_streams.add(client_id)
         
     print(f"[Backend] Routage du flux vers {target_node.node_id} (Zone: {target_node.zone_id}, IP: {target_node.ip_address})")
     
@@ -92,8 +99,10 @@ async def publish_stream(websocket: WebSocket, client_id: str, db: Session = Dep
         print(f"[Backend] Erreur de distribution vers l'Edge: {e}")
         try:
             await websocket.close(code=1011, reason="Erreur de distribution vers le Edge")
-        except:
+        except Exception:
             pass
+    finally:
+        active_streams.discard(client_id)
 
 
 async def verify_crypto_integrity(fragment_b64: str, zone_id: str, expected_v_matrix: list) -> bool:

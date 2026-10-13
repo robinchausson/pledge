@@ -10,7 +10,7 @@ sys.setrecursionlimit(5000)
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-from py_ecc.bn128 import G1, G2, add, curve_order, multiply, pairing
+from py_ecc.bn128 import G1, curve_order, multiply
 
 
 SIS_L = 64
@@ -22,7 +22,7 @@ PARAM_A = 42
 class CryptoState:
     secret_scalar: int | None = None
     public_key: tuple | None = None
-    secret_share: tuple | None = None
+    secret_share: int | None = None
 
 
 state = CryptoState()
@@ -56,14 +56,23 @@ def hash_h2(vector: list[int], param_a: int, pairing_value: object) -> int:
 
 
 def generate_signature(vector: list[int], param_a: int) -> dict:
-    if state.secret_share is None:
+    if state.secret_scalar is None:
         raise RuntimeError("La clé privée de zone n'est pas initialisée")
 
-    # [MODE RAPIDE ACTIVÉ]
-    # Le Pairing sur bn128 prend ~6.5 secondes par fragment en Python pur, 
-    # ce qui sature les WebSockets et provoque le "keepalive ping timeout".
-    # Pour que la vidéo soit fluide en temps réel, on bypass le calcul de signature ici.
-    return {"w1": 123456789, "w2": [0, 0], "p1": point_to_json(state.public_key)}
+    # Signature de type Schnorr/Hess sur BN128. Le nonce est propre à chaque
+    # fragment : une signature constante ne permettrait pas d'authentifier les
+    # données et rendrait la preuve reproductible. Le challenge ne calcule pas
+    # de pairing à chaque fragment, car cette opération est trop lente dans
+    # py_ecc pur Python pour un flux vidéo.
+    nonce = secrets.randbelow(curve_order - 1) + 1
+    p1 = multiply(G1, nonce)
+    w1 = hash_h2(vector, param_a, point_to_json(p1))
+    w2 = multiply(G1, (nonce + w1 * state.secret_scalar) % curve_order)
+    return {
+        "w1": w1,
+        "w2": point_to_json(w2),
+        "p1": point_to_json(p1),
+    }
 
 
 def decode_fragment(fragment_data: str) -> bytes:
@@ -80,7 +89,7 @@ async def lifespan(_: FastAPI):
     if not 0 < state.secret_scalar < curve_order:
         raise RuntimeError("CRYPTO_SECRET_SCALAR doit être compris entre 1 et curve_order - 1")
     state.public_key = multiply(G1, state.secret_scalar)
-    state.secret_share = state.public_key
+    state.secret_share = state.secret_scalar
     yield
 
 

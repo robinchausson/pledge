@@ -10,13 +10,13 @@ import jwt
 try:
     from .models import get_db, User, SessionLocal, EdgeNode, DataLocation
     from . import schemas, security
-    from .stream_router import router as stream_router
+    from .stream_router import router as stream_router, get_active_streams
     from .mqtt_client import start_mqtt
 except ImportError:
     from models import get_db, User, SessionLocal, EdgeNode, DataLocation
     import schemas
     import security
-    from stream_router import router as stream_router
+    from stream_router import router as stream_router, get_active_streams
     from mqtt_client import start_mqtt
 
 mqtt_client_instance = None
@@ -215,11 +215,8 @@ def get_edge_nodes(db: Session = Depends(get_db), current_user: User = Depends(g
     return {"zones": zones}
 
 @app.get("/api/streams/active")
-def get_active_streams(db: Session = Depends(get_db)):
-    locations = db.query(DataLocation).all()
-    # On récupère les emails des diffuseurs de manière unique
-    streams = list(set([loc.client_id for loc in locations]))
-    return {"streams": streams}
+def list_active_streams():
+    return {"streams": get_active_streams()}
 
 @app.get("/")
 def read_root():
