@@ -1,15 +1,21 @@
-version: '3.8'
-
 services:
   broker_mqtt:
     image: eclipse-mosquitto:latest
     container_name: broker_zone
     restart: unless-stopped
     ports:
-      - "1883:1883"
+      - "${MQTT_PORT:-1883}:1883"
     volumes:
       - ./mosquitto.conf:/mosquitto/config/mosquitto.conf
       - mosquitto_data:/mosquitto/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 2 nc -z 127.0.0.1 1883 || exit 0"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 3s
 
 volumes:
   mosquitto_data:

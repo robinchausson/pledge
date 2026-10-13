@@ -1,4 +1,5 @@
 import base64
+import functools
 import hashlib
 import os
 import secrets
@@ -8,9 +9,9 @@ from contextlib import asynccontextmanager
 sys.setrecursionlimit(5000)
 
 import numpy as np
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
-from py_ecc.bn128 import G1, G2, add, curve_order, multiply, pairing
+from py_ecc.bn128 import FQ, G1, G2, add, curve_order, multiply, pairing
 
 
 SIS_L = 64
@@ -32,7 +33,11 @@ def point_to_json(point: tuple) -> list[int]:
     return [int(coordinate.n) if hasattr(coordinate, "n") else int(coordinate) for coordinate in point]
 
 
-import functools
+def json_to_point(coords: list[int]) -> tuple:
+    if len(coords) != 2:
+        raise ValueError("Un point G1 doit comporter exactement 2 coordonnées")
+    return (FQ(int(coords[0])), FQ(int(coords[1])))
+
 
 @functools.lru_cache(maxsize=1)
 def reconstruct_matrix_a(seed: int) -> np.ndarray:
@@ -59,11 +64,43 @@ def generate_signature(vector: list[int], param_a: int) -> dict:
     if state.secret_share is None:
         raise RuntimeError("La clé privée de zone n'est pas initialisée")
 
-    # [MODE RAPIDE ACTIVÉ]
-    # Le Pairing sur bn128 prend ~6.5 secondes par fragment en Python pur, 
-    # ce qui sature les WebSockets et provoque le "keepalive ping timeout".
-    # Pour que la vidéo soit fluide en temps réel, on bypass le calcul de signature ici.
-    return {"w1": 123456789, "w2": [0, 0], "p1": point_to_json(state.public_key)}
+    # Génération réelle de signature Hess-IBS sur courbe BN128
+    nonce = secrets.randbelow(curve_order - 1) + 1
+    pairing_value = pairing(G2, multiply(G1, nonce))
+    challenge = hash_h2(vector, param_a, pairing_value)
+    
+    # signature_point = (challenge * secret_key) + (nonce * G1)
+    sig_term1 = multiply(state.secret_share, challenge)
+    sig_term2 = multiply(G1, nonce)
+    signature_point = add(sig_term1, sig_term2)
+    
+    return {
+        "version": "1.0",
+        "w1": int(challenge),
+        "w2": point_to_json(signature_point),
+        "p1": point_to_json(G1),
+    }
+
+
+def verify_signature_math(vector: list[int], param_a: int, sig_dict: dict) -> tuple[bool, str]:
+    if state.public_key is None:
+        return False, "Nœud crypto non initialisé"
+
+    try:
+        w1 = int(sig_dict["w1"])
+        w2 = json_to_point(sig_dict["w2"])
+        
+        # Vérification par accouplement : R' = w2 - (w1 * P_pub)
+        neg_w1 = (curve_order - (w1 % curve_order)) % curve_order
+        r_point = add(w2, multiply(state.public_key, neg_w1))
+        r_pairing = pairing(G2, r_point)
+        
+        expected_w1 = hash_h2(vector, param_a, r_pairing)
+        if expected_w1 == w1:
+            return True, "Signature Hess-IBS valide"
+        return False, "Échec de correspondance du challenge cryptographique"
+    except Exception as e:
+        return False, f"Erreur de décodage/vérification : {e}"
 
 
 def decode_fragment(fragment_data: str) -> bytes:
@@ -76,20 +113,34 @@ def decode_fragment(fragment_data: str) -> bytes:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     configured_scalar = os.environ.get("CRYPTO_SECRET_SCALAR")
-    state.secret_scalar = int(configured_scalar) if configured_scalar else secrets.randbelow(curve_order - 1) + 1
+    if configured_scalar:
+        state.secret_scalar = int(configured_scalar)
+    else:
+        # Secret par défaut déterministe pour dev si non fourni, évite changement aléatoire
+        state.secret_scalar = 123456789
+        print("[crypto-node] AVERTISSEMENT : CRYPTO_SECRET_SCALAR non fourni, utilisation du secret par défaut.")
+
     if not 0 < state.secret_scalar < curve_order:
         raise RuntimeError("CRYPTO_SECRET_SCALAR doit être compris entre 1 et curve_order - 1")
+        
     state.public_key = multiply(G1, state.secret_scalar)
     state.secret_share = state.public_key
+    print(f"[crypto-node] Initialisé avec succès. Clé publique: {point_to_json(state.public_key)}")
     yield
 
 
-app = FastAPI(title="StreamFog Crypto Node", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="Pledge Crypto Node", version="1.0.0", lifespan=lifespan)
 
 
 class FragmentRequest(BaseModel):
     fragment_data: str = Field(..., description="Fragment encodé en Base64")
     param_a: int = Field(PARAM_A, alias="paramA")
+
+
+class VerifyRequest(BaseModel):
+    v_matrix: list[int] = Field(..., alias="V_matrix", description="Vecteur SIS V_matrix")
+    param_a: int = Field(PARAM_A, alias="paramA")
+    signature: dict = Field(..., description="Objet signature Hess-IBS {w1, w2, p1}")
 
 
 @app.get("/")
@@ -98,8 +149,14 @@ def read_root() -> dict[str, str]:
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+def health() -> dict:
+    is_ready = state.public_key is not None
+    return {
+        "status": "ok" if is_ready else "not_ready",
+        "initialized": is_ready,
+        "curve": "bn128",
+        "version": "1.0",
+    }
 
 
 @app.get("/api/v1/crypto/parameters")
@@ -111,7 +168,7 @@ def get_crypto_parameters() -> dict:
         "public_key": point_to_json(state.public_key),
         "paramA": PARAM_A,
         "sis": {"l": SIS_L, "m": SIS_M, "q": SIS_Q, "hash": "SHA-256"},
-        "signature": {"scheme": "Hess-IBS", "group": "G1"},
+        "signature": {"scheme": "Hess-IBS", "group": "G1", "version": "1.0"},
     }
 
 
@@ -130,3 +187,11 @@ def sign_fragment(request: FragmentRequest) -> dict:
         raise HTTPException(status_code=422, detail=f"paramA doit valoir {PARAM_A}")
     vector = compute_integrity(fragment)
     return {"paramA": PARAM_A, "V_matrix": vector, "signature": generate_signature(vector, PARAM_A)}
+
+
+@app.post("/api/v1/crypto/verify")
+def verify_signature(request: VerifyRequest) -> dict:
+    if request.param_a != PARAM_A:
+        raise HTTPException(status_code=422, detail=f"paramA doit valoir {PARAM_A}")
+    is_valid, reason = verify_signature_math(request.v_matrix, request.param_a, request.signature)
+    return {"valid": is_valid, "detail": reason}

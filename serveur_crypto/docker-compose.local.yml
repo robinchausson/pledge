@@ -5,10 +5,19 @@ services:
     container_name: crypto_node_zone_alpha
     restart: unless-stopped
     ports:
-      - "8443:8443"
+      - "${CRYPTO_PORT:-8443}:8443"
     environment:
-      CRYPTO_SECRET_SCALAR: ${CRYPTO_SECRET_SCALAR:-}
-      TLS_CERT_FILE: /certs/tls.crt
-      TLS_KEY_FILE: /certs/tls.key
+      CRYPTO_PORT: 8443
+      CRYPTO_SECRET_SCALAR: ${CRYPTO_SECRET_SCALAR:-123456789}
+      TLS_CERT_FILE: ${TLS_CERT_FILE:-/certs/tls.crt}
+      TLS_KEY_FILE: ${TLS_KEY_FILE:-/certs/tls.key}
     volumes:
       - ./certs:/certs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request, ssl; ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE; urllib.request.urlopen(\"https://127.0.0.1:8443/health\", context=ctx, timeout=3)' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s

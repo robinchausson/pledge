@@ -4,20 +4,33 @@ services:
     container_name: pledge_backend
     restart: always
     ports:
-      - "8000:8000"
+      - "${BACKEND_PORT:-8000}:8000"
     environment:
-      - BROKER_IP=${LAN_IP_BROKER:-192.168.x.x}
-      - BROKER_PORT=1883
-      - CRYPTO_URL_ZONE_1=${LAN_URL_CRYPTO_1:-https://192.168.x.x:8443}
+      - BROKER_HOST=${BROKER_HOST:-${LAN_IP_BROKER:-127.0.0.1}}
+      - BROKER_PORT=${BROKER_PORT:-1883}
+      - BROKER_IP=${BROKER_HOST:-${LAN_IP_BROKER:-127.0.0.1}}
+      - CRYPTO_URL_ZONE_1=${CRYPTO_URL_ZONE_1:-${LAN_URL_CRYPTO_1:-https://127.0.0.1:8443}}
+      - CRYPTO_URL_ZONE_2=${CRYPTO_URL_ZONE_2:-https://127.0.0.1:8444}
+      - CRYPTO_VERIFY_SSL=${CRYPTO_VERIFY_SSL:-false}
+      - DATABASE_URL=${DATABASE_URL:-sqlite:///./data/app.db}
+      - EDGE_WS_SCHEME=${EDGE_WS_SCHEME:-ws}
     volumes:
       - ./backend/data:/app/data
       - /var/run/docker.sock:/var/run/docker.sock
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://127.0.0.1:8000/health\", timeout=3)' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
 
   frontend:
     build: ./frontend
     container_name: pledge_frontend
     restart: always
     ports:
-      - "5173:5173"
+      - "${FRONTEND_PORT:-5173}:5173"
     environment:
-      - VITE_API_URL=${LAN_URL_BACKEND:-http://192.168.x.x:8000}
+      - VITE_API_URL=${VITE_API_URL:-${LAN_URL_BACKEND:-http://127.0.0.1:8000}}

@@ -5,9 +5,17 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
+    host: true,
     proxy: {
-      '/auth': 'http://127.0.0.1:8000',
-      '/api': 'http://127.0.0.1:8000',
+      '/auth': {
+        target: process.env.VITE_BACKEND_INTERNAL_URL || 'http://backend:8000',
+        changeOrigin: true,
+      },
+      '/api': {
+        target: process.env.VITE_BACKEND_INTERNAL_URL || 'http://backend:8000',
+        changeOrigin: true,
+        ws: true,
+      },
     },
   },
 })

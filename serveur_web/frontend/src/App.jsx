@@ -1,9 +1,9 @@
 import { useEffect, useState, useRef } from 'react'
 
 const API_URL = import.meta.env.VITE_API_URL || ''
-const WS_URL = API_URL ? API_URL.replace(/^http/, 'ws') : `ws://${window.location.host}`
-
-
+const WS_URL = API_URL
+  ? API_URL.replace(/^http/, 'ws')
+  : `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.hostname}:8000`
 
 async function apiRequest(path, options = {}) {
   const response = await fetch(`${API_URL}${path}`, {
@@ -91,9 +91,16 @@ function ActiveStreamsList({ onSelectStream }) {
   const [streams, setStreams] = useState([])
   
   useEffect(() => {
-    apiRequest('/api/streams/active').then(data => {
-      if (data.streams) setStreams(data.streams)
-    })
+    function fetchStreams() {
+      apiRequest('/api/streams/active')
+        .then(data => {
+          if (data && Array.isArray(data.streams)) setStreams(data.streams)
+        })
+        .catch(() => {})
+    }
+    fetchStreams()
+    const interval = setInterval(fetchStreams, 3000)
+    return () => clearInterval(interval)
   }, [])
 
   if (streams.length === 0) return <p style={{color: '#888'}}>Aucun flux en direct actuellement.</p>
@@ -133,6 +140,7 @@ function Home({ openAuth }) {
 
 function StreamerInterface({ user }) {
   const [streaming, setStreaming] = useState(false)
+  const [chunksSent, setChunksSent] = useState(0)
   const [ws, setWs] = useState(null)
   const [mediaRecorder, setMediaRecorder] = useState(null)
   const videoRef = useRef()
@@ -140,20 +148,23 @@ function StreamerInterface({ user }) {
   async function startStream() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
-      videoRef.current.srcObject = stream
+      if (videoRef.current) videoRef.current.srcObject = stream
       
       const socket = new WebSocket(`${WS_URL}/api/stream/publish/${user.email}`)
       socket.onopen = () => {
         setStreaming(true)
-        // Note: mimeType fallback if vp8 is not supported on this browser (ex: Safari)
+        setChunksSent(0)
         const mime = MediaRecorder.isTypeSupported('video/webm; codecs=vp8,opus') ? 'video/webm; codecs=vp8,opus' : 'video/webm'
         const recorder = new MediaRecorder(stream, { mimeType: mime })
+        
         recorder.ondataavailable = async (e) => {
           if (e.data.size > 0 && socket.readyState === WebSocket.OPEN) {
             socket.send(await e.data.arrayBuffer())
+            setChunksSent(c => c + 1)
           }
         }
-        recorder.start(1000)
+        // Cadence basse latence à 600ms
+        recorder.start(600)
         setMediaRecorder(recorder)
       }
       
@@ -177,7 +188,7 @@ function StreamerInterface({ user }) {
   }
 
   function stopStream() {
-    if (mediaRecorder) mediaRecorder.stop()
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop()
     if (ws) ws.close()
     setStreaming(false)
     if (videoRef.current && videoRef.current.srcObject) {
@@ -190,7 +201,7 @@ function StreamerInterface({ user }) {
     <article className="dashboard-card stream-card">
       <div className="card-heading">
         <div><span className="eyebrow">Studio Edge</span><h2>Votre diffusion</h2></div>
-        <span className="connection-badge"><i style={{background: streaming ? '#22c55e' : '#ef4444'}} /> {streaming ? 'En ligne' : 'Hors ligne'}</span>
+        <span className="connection-badge"><i style={{background: streaming ? '#22c55e' : '#ef4444'}} /> {streaming ? `En ligne (${chunksSent} blocs)` : 'Hors ligne'}</span>
       </div>
       <video ref={videoRef} autoPlay muted style={{width: '100%', background: '#000', borderRadius: '12px', minHeight: '200px'}} />
       <div style={{marginTop: '1rem'}}>
@@ -207,6 +218,7 @@ function StreamerInterface({ user }) {
 function ViewerInterface({ user }) {
   const [streamId, setStreamId] = useState('')
   const [watching, setWatching] = useState(false)
+  const [chunksReceived, setChunksReceived] = useState(0)
   const videoRef = useRef()
   const [ws, setWs] = useState(null)
   
@@ -214,12 +226,12 @@ function ViewerInterface({ user }) {
     const targetId = idToWatch || streamId
     if (!targetId) return
     setWatching(true)
+    setChunksReceived(0)
     
     const socket = new WebSocket(`${WS_URL}/api/stream/watch/${targetId}`)
     socket.binaryType = "arraybuffer"
     
     const mediaSource = new MediaSource()
-    // Needs a slight delay for react to mount video ref if we just toggled watching
     setTimeout(() => {
       if (videoRef.current) {
         videoRef.current.src = URL.createObjectURL(mediaSource)
@@ -228,23 +240,55 @@ function ViewerInterface({ user }) {
     
     mediaSource.addEventListener('sourceopen', () => {
       const mime = MediaRecorder.isTypeSupported('video/webm; codecs=vp8,opus') ? 'video/webm; codecs=vp8,opus' : 'video/webm'
-      const sourceBuffer = mediaSource.addSourceBuffer(mime)
+      let sourceBuffer
+      try {
+        sourceBuffer = mediaSource.addSourceBuffer(mime)
+      } catch (err) {
+        console.error("Erreur addSourceBuffer:", err)
+        return
+      }
+
       const queue = []
       
+      function processQueue() {
+        if (queue.length > 0 && sourceBuffer && !sourceBuffer.updating) {
+          const next = queue.shift()
+          try {
+            sourceBuffer.appendBuffer(next)
+          } catch (e) {
+            console.warn("Erreur buffer append:", e)
+          }
+        }
+      }
+
       socket.onmessage = (event) => {
         const chunk = new Uint8Array(event.data)
-        if (!sourceBuffer.updating && queue.length === 0) {
-          sourceBuffer.appendBuffer(chunk)
+        setChunksReceived(c => c + 1)
+        if (sourceBuffer && !sourceBuffer.updating && queue.length === 0) {
+          try {
+            sourceBuffer.appendBuffer(chunk)
+          } catch (e) {
+            queue.push(chunk)
+          }
         } else {
-          queue.push(chunk)
+          // Limite de taille de file d'attente pour éviter la saturation mémoire
+          if (queue.length < 50) {
+            queue.push(chunk)
+          }
+        }
+
+        // Tentative de lecture automatique
+        if (videoRef.current && videoRef.current.paused) {
+          videoRef.current.play().catch(() => {
+            if (videoRef.current) {
+              videoRef.current.muted = true
+              videoRef.current.play().catch(() => {})
+            }
+          })
         }
       }
       
-      sourceBuffer.addEventListener('updateend', () => {
-        if (queue.length > 0 && !sourceBuffer.updating) {
-          sourceBuffer.appendBuffer(queue.shift())
-        }
-      })
+      sourceBuffer.addEventListener('updateend', processQueue)
     })
     
     socket.onclose = (e) => {
@@ -264,6 +308,7 @@ function ViewerInterface({ user }) {
     <article className="dashboard-card stream-card">
       <div className="card-heading">
         <div><span className="eyebrow">Lecteur Edge</span><h2>Regarder un flux</h2></div>
+        {watching && <span className="connection-badge"><i style={{background: '#22c55e'}} /> Direct ({chunksReceived} blocs)</span>}
       </div>
       {!watching ? (
         <div style={{marginTop: '1rem'}}>
@@ -272,7 +317,7 @@ function ViewerInterface({ user }) {
         </div>
       ) : (
         <>
-          <video ref={videoRef} autoPlay controls style={{width: '100%', background: '#000', borderRadius: '12px', minHeight: '200px', marginTop: '1rem'}} />
+          <video ref={videoRef} autoPlay controls playsInline style={{width: '100%', background: '#000', borderRadius: '12px', minHeight: '200px', marginTop: '1rem'}} />
           <div style={{marginTop: '1rem'}}>
             <button className="button button-quiet" onClick={stopWatching}>Arrêter de regarder</button>
           </div>

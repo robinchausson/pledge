@@ -1,18 +1,30 @@
-version: '3.8'
-
 services:
   client_telemetrie:
     build: .
     container_name: client_mqtt_edge
     restart: always
     ports:
-      - "8444:8444"
+      - "${EDGE_WS_PORT:-8444}:8444"
     environment:
-      - BROKER_IP=host.docker.internal
-      - BROKER_PORT=1883
       - NODE_ID=Local_Edge_Node
       - ZONE_ID=Zone_1
-      - PORT_WSS=8444
-      - NODE_IP=host.docker.internal
+      - NODE_HOST=host.docker.internal
+      - EDGE_WS_PORT=8444
+      - EDGE_WS_SCHEME=ws
+      - BROKER_HOST=host.docker.internal
+      - BROKER_PORT=1883
+      - EDGE_DATA_DIR=/donnees_isolees
+      - TELEMETRY_INTERVAL_SEC=5
     volumes:
-      - /:/host_root:ro
+      - edge_storage_data:/donnees_isolees
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import socket; s = socket.socket(); s.settimeout(2); s.connect((\"127.0.0.1\", 8444))' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  edge_storage_data:
