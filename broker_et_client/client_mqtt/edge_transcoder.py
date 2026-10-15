@@ -99,28 +99,51 @@ class EdgeTranscoder:
             self.delegations[session_id] = del_info
             return del_info
 
-        # Option B : Appel sécurisé si le serveur crypto relaie la délégation
-        if HAS_HTTPX and self.crypto_url and owner_secret_key is not None:
+        # Option B : Appel sécurisé au serveur crypto pour émission de délégation (Section 3.6.1)
+        if HAS_HTTPX and self.crypto_url:
             try:
                 payload = {
                     "owner_identity": owner_id,
                     "delegate_identity": self.node_id,
-                    "owner_secret_key": owner_secret_key,
                 }
+                if owner_secret_key is not None:
+                    payload["owner_secret_key"] = owner_secret_key
                 with httpx.Client(timeout=3.0, verify=False) as client:
                     resp = client.post(f"{self.crypto_url}/api/v1/crypto/delegation/issue", json=payload)
-                    resp.raise_for_status()
-                    data = resp.json()
-                    del_info = {
-                        "owner_id": owner_id,
-                        "delegation_key": data["delegation_key"],
-                        "delegate_pk": data["delegate_pk"],
-                        "zone_pk": data.get("zone_pk"),
-                    }
-                    self.delegations[session_id] = del_info
-                    return del_info
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        del_info = {
+                            "owner_id": owner_id,
+                            "delegation_key": data["delegation_key"],
+                            "delegate_pk": data["delegate_pk"],
+                            "zone_pk": data.get("zone_pk"),
+                        }
+                        self.delegations[session_id] = del_info
+                        clean_id = re.sub(r'[^a-zA-Z0-9_\-.]', '_', session_id.strip())
+                        self.delegations[clean_id] = del_info
+                        return del_info
             except Exception as e:
-                print(f"[{self.node_id}] Erreur obtention délégation HTTP: {e}", flush=True)
+                print(f"[{self.node_id}] Avertissement obtention délégation HTTP: {e}", flush=True)
+
+        # Option C : Calcul local autonome si le scalaire de zone est configuré
+        sec_scalar = os.getenv("CRYPTO_SECRET_SCALAR")
+        if HAS_LOCAL_CRYPTO and sec_scalar:
+            try:
+                msk, pk_zone = crypto_engine.generate_zone_master_key(int(sec_scalar))
+                owner_sec = crypto_engine.compute_secret_share(msk, owner_id)
+                dk_d, pk_d = crypto_engine.generate_delegation_key(owner_sec, self.node_id)
+                del_info = {
+                    "owner_id": owner_id,
+                    "delegation_key": crypto_engine.g1_to_json(dk_d),
+                    "delegate_pk": crypto_engine.g2_to_json(pk_d),
+                    "zone_pk": crypto_engine.g2_to_json(pk_zone),
+                }
+                self.delegations[session_id] = del_info
+                clean_id = re.sub(r'[^a-zA-Z0-9_\-.]', '_', session_id.strip())
+                self.delegations[clean_id] = del_info
+                return del_info
+            except Exception as e:
+                print(f"[{self.node_id}] Avertissement obtention délégation locale: {e}", flush=True)
 
         raise RuntimeError(
             f"Aucune clé de délégation disponible pour le nœud {self.node_id} sur la session {session_id}. "

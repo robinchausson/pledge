@@ -108,40 +108,43 @@ def select_best_edge_node(db: Session, zone_id: str = "Zone_1") -> EdgeNode:
     """Sélectionne le meilleur nœud Edge actif en fonction de last_seen, CPU et espace disque."""
     threshold = datetime.datetime.utcnow() - datetime.timedelta(seconds=45)
 
-    # 1. Nœuds actifs récents dans la zone demandée
+    # 1. Nœuds actifs récents dans la zone demandée (vrais nœuds connectés)
     active_nodes = (
         db.query(EdgeNode)
+        .filter(EdgeNode.node_id != "Edge_Node_01")
         .filter(EdgeNode.last_seen >= threshold)
         .all()
     )
 
     if not active_nodes:
-        # Repli : nœuds vus dans les 5 dernières minutes
+        # Repli : autres vrais nœuds vus récemment
         fallback_threshold = datetime.datetime.utcnow() - datetime.timedelta(minutes=5)
         active_nodes = (
             db.query(EdgeNode)
+            .filter(EdgeNode.node_id != "Edge_Node_01")
             .filter(EdgeNode.last_seen >= fallback_threshold)
             .all()
         )
 
     if not active_nodes:
-        # Dernier recours : n'importe quel nœud en base
-        active_nodes = db.query(EdgeNode).all()
-
-    if not active_nodes:
-        # Si aucun nœud n'est encore enregistré dans la DB, créer un nœud par défaut pour dev/test
-        default_node = EdgeNode(
-            node_id="Edge_Node_01",
-            zone_id=zone_id or "Zone_1",
-            ip_address="127.0.0.1",
-            wss_port=8444,
-            storage_available_gb=50.0,
-            cpu_usage_pct=10.0,
-            last_seen=datetime.datetime.utcnow(),
-        )
-        db.add(default_node)
-        db.commit()
-        db.refresh(default_node)
+        # Nœud par défaut jusqu'à ce que des vrais nœuds se connectent
+        default_node = db.query(EdgeNode).filter(EdgeNode.node_id == "Edge_Node_01").first()
+        if not default_node:
+            default_node = EdgeNode(
+                node_id="Edge_Node_01",
+                zone_id=zone_id or "Zone_1",
+                ip_address=os.getenv("EDGE_DEFAULT_HOST", "127.0.0.1"),
+                wss_port=int(os.getenv("EDGE_DEFAULT_PORT", "8444")),
+                storage_available_gb=50.0,
+                cpu_usage_pct=10.0,
+                last_seen=datetime.datetime.utcnow(),
+            )
+            db.add(default_node)
+            db.commit()
+            db.refresh(default_node)
+        else:
+            default_node.last_seen = datetime.datetime.utcnow()
+            db.commit()
         return default_node
 
     # Score de sélection : favorise le stockage disponible et pénalise la charge CPU
@@ -289,6 +292,10 @@ def stop_stream_session(session_id: str, db: Session = Depends(get_db)):
         session.status = "stopped"
         session.last_active = datetime.datetime.utcnow()
         db.commit()
+
+    # Nettoyer l'emplacement et la mémoire des blocs de ce flux
+    db.query(DataLocation).filter(DataLocation.client_id == clean_session_id).delete()
+    db.commit()
 
     # Commander la purge du stockage sur le nœud Edge via MQTT
     try:

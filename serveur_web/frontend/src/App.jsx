@@ -1,7 +1,8 @@
-import { useEffect, useState, useRef } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import {
   computeSisVector,
   signHessIBS,
+  generateDelegationKey,
   verifyIncomingBlock,
   deriveStreamerKey,
   uint8ArrayToBase64,
@@ -194,6 +195,25 @@ function SimpleSidebar({ streams, activeStream, onSelectStream, isCollapsed, onT
   )
 }
 
+// Détecte et extrait la charge utile WebM pure si un préfixe textuel de transcodage (ex: [720P] ) a été injecté
+function extractPlayableMediaChunk(chunk) {
+  if (chunk && chunk.length > 7 && chunk[0] === 0x5b /* '[' */) {
+    let closeIdx = -1
+    for (let i = 1; i < Math.min(chunk.length, 12); i++) {
+      if (chunk[i] === 0x5d /* ']' */) {
+        closeIdx = i
+        break
+      }
+    }
+    if (closeIdx > 0) {
+      let startIdx = closeIdx + 1
+      if (startIdx < chunk.length && chunk[startIdx] === 0x20 /* ' ' */) startIdx++
+      return chunk.slice(startIdx)
+    }
+  }
+  return chunk
+}
+
 // =====================================================================
 // INTERFACE VISIONNEUR ÉPURÉE ET SIMPLE
 // =====================================================================
@@ -209,6 +229,8 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
   const [showTechnicalDetails, setShowTechnicalDetails] = useState(false)
   const videoRef = useRef(null)
   const [ws, setWs] = useState(null)
+  const hasJumpedToLiveRef = useRef(false)
+  const wsRef = useRef(null)
 
   // Audit Public d'Intégrité sans TPA (Phase 5)
   const [auditStatus, setAuditStatus] = useState('idle') // 'idle' | 'intact' | 'delegated' | 'tampered'
@@ -220,22 +242,27 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
     tamperedCount: 0,
     lastDetail: '',
   })
-  const [simulateTamper, setSimulateTamper] = useState(false)
-  const simulateTamperRef = useRef(false)
   const [lastPacketData, setLastPacketData] = useState(null)
 
   useEffect(() => {
     if (selectedStreamId && selectedStreamId !== streamId) {
       setStreamId(selectedStreamId)
       startWatching(selectedStreamId, quality)
+    } else if (!selectedStreamId && streamId) {
+      stopWatching()
+      setStreamId('')
     }
   }, [selectedStreamId])
 
-  function toggleTamperSimulation() {
-    const nextVal = !simulateTamper
-    setSimulateTamper(nextVal)
-    simulateTamperRef.current = nextVal
-  }
+  useEffect(() => {
+    return () => {
+      if (wsRef.current) {
+        try {
+          wsRef.current.close()
+        } catch (_) {}
+      }
+    }
+  }, [])
 
   function handlePlayPause() {
     if (!videoRef.current) return
@@ -275,6 +302,12 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
     const targetId = idToWatch || streamId
     if (!targetId) return
 
+    if (wsRef.current) {
+      try {
+        wsRef.current.close()
+      } catch (_) {}
+      wsRef.current = null
+    }
     if (ws) {
       try {
         ws.close()
@@ -401,8 +434,15 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
               try {
                 if (sourceBuffer.buffered.length > 0) {
                   const bufferStart = sourceBuffer.buffered.start(0)
-                  if (videoRef.current.currentTime < bufferStart) {
-                    videoRef.current.currentTime = bufferStart
+                  const bufferEnd = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1)
+
+                  // 1. Accrochage automatique au bord du direct (Live Edge) au démarrage ou changement de qualité
+                  if (!hasJumpedToLiveRef.current) {
+                    videoRef.current.currentTime = Math.max(bufferStart, bufferEnd - 0.4)
+                    hasJumpedToLiveRef.current = true
+                  } else if (bufferEnd - videoRef.current.currentTime > 5.0) {
+                    // Si la lecture prend plus de 5s de retard sur le direct (ex: micro-coupure réseau)
+                    videoRef.current.currentTime = Math.max(bufferStart, bufferEnd - 0.4)
                   }
                 }
                 handleGapNudge()
@@ -457,11 +497,6 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
 
         if (!chunk) return
 
-        // Simulation d'altération en transit pour démonstration
-        if (simulateTamperRef.current) {
-          chunk[0] ^= 0x55
-        }
-
         // VÉRIFICATION D'INTÉGRITÉ CÔTÉ SPECTATEUR (Phase 5)
         if (packet) {
           setLastPacketData(packet)
@@ -495,7 +530,8 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
         }
 
         setChunksReceived((c) => c + 1)
-        queue.push(chunk)
+        const playableChunk = extractPlayableMediaChunk(chunk)
+        queue.push(playableChunk)
         processQueue()
 
         if (videoRef.current && videoRef.current.paused && auditStatus !== 'tampered') {
@@ -509,9 +545,13 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
       }
 
       socket.onclose = () => {
+        if (wsRef.current === socket) {
+          wsRef.current = null
+        }
         setWatching(false)
       }
 
+      wsRef.current = socket
       setWs(socket)
     } catch (err) {
       console.error('Erreur découverte flux:', err)
@@ -521,10 +561,32 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
   }
 
   function stopWatching() {
-    if (ws) ws.close()
-    if (videoRef.current) videoRef.current.src = ''
+    if (wsRef.current) {
+      try {
+        wsRef.current.close()
+      } catch (_) {}
+      wsRef.current = null
+    }
+    if (ws) {
+      try {
+        ws.close()
+      } catch (_) {}
+      setWs(null)
+    }
+    if (videoRef.current) {
+      videoRef.current.src = ''
+    }
     setWatching(false)
+    setConnectedNode(null)
     setAuditStatus('idle')
+  }
+
+  function jumpToLive() {
+    if (videoRef.current && videoRef.current.buffered && videoRef.current.buffered.length > 0) {
+      const end = videoRef.current.buffered.end(videoRef.current.buffered.length - 1)
+      videoRef.current.currentTime = Math.max(0, end - 0.4)
+      videoRef.current.play().catch(() => {})
+    }
   }
 
   const streamerName = streamId ? streamId.split('@')[0] : 'Pledge'
@@ -543,7 +605,12 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
               {/* Incrustations discrètes sur le lecteur */}
               <div className="player-top-overlay">
                 <div className="player-top-left-badges">
-                  <span className="live-badge">
+                  <span
+                    className="live-badge"
+                    style={{ cursor: 'pointer' }}
+                    title="Cliquer pour caler la lecture au direct"
+                    onClick={jumpToLive}
+                  >
                     <span className="pulse-dot" /> EN DIRECT
                   </span>
                   {connectedNode && (
@@ -628,7 +695,9 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
               <p className="offline-subtitle">
                 {streamId
                   ? 'Diffusion prête. Cliquez sur le bouton pour démarrer le visionnage.'
-                  : 'Choisissez une diffusion dans la liste à gauche.'}
+                  : streams.length > 0
+                  ? 'Choisissez une diffusion dans la liste à gauche.'
+                  : "Aucun diffuseur n'émet actuellement sur le réseau."}
               </p>
 
               {streamId ? (
@@ -657,7 +726,7 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
             <div className="channel-avatar-large">{streamerName.charAt(0).toUpperCase()}</div>
             <div className="channel-text-content">
               <h1 className="channel-stream-title">
-                {streamId ? `Diffusion de ${streamerName}` : 'Pledge Live Stream'}
+                {streamId ? `Diffusion de ${streamerName}` : 'Aucune diffusion en direct'}
               </h1>
               <div className="channel-meta-row">
                 <span className="channel-streamer-name">
@@ -706,16 +775,6 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
             </div>
 
             <div className="integrity-summary-actions">
-              <button
-                type="button"
-                className={`button-attack-toggle ${simulateTamper ? 'active' : ''}`}
-                onClick={toggleTamperSimulation}
-                title="Simule une corruption de trame pour tester le rejet immédiat"
-              >
-                <ZapIcon size={13} />
-                <span>{simulateTamper ? 'Attaque active' : 'Tester altération'}</span>
-              </button>
-
               <button
                 type="button"
                 className="button button-quiet button-small"
@@ -811,12 +870,29 @@ function StreamerInterface({ user }) {
         user.email
       )}${tokenParam}`
 
+      // Génération de la clé de délégation Fog pour le nœud assigné (Section 3.6.1)
+      const targetDelegateNode = alloc.edge_node_id || 'Local_Edge_Node'
+      const delegation = generateDelegationKey(streamerKey.secretKey, targetDelegateNode)
+
       const socket = new WebSocket(directUploadUrl)
       blockIndexRef.current = 0
 
       socket.onopen = () => {
         setStreaming(true)
         setChunksSent(0)
+
+        // Transmission explicite de la délégation Fog dès l'ouverture du flux
+        socket.send(
+          JSON.stringify({
+            type: 'delegation',
+            session_id: user.email,
+            owner_id: user.email,
+            delegation_key: delegation.delegationKey,
+            delegate_pk: delegation.delegatePk,
+            zone_pk: streamerKey.zonePk,
+          })
+        )
+
         const mime = MediaRecorder.isTypeSupported('video/webm; codecs=vp8,opus')
           ? 'video/webm; codecs=vp8,opus'
           : 'video/webm'
@@ -847,6 +923,8 @@ function StreamerInterface({ user }) {
               signer_id: user.email,
               zone_pk: streamerKey.zonePk,
               is_delegated: false,
+              delegation_key: delegation.delegationKey,
+              delegate_pk: delegation.delegatePk,
             }
 
             socket.send(JSON.stringify(packet))
@@ -1133,8 +1211,12 @@ export default function App() {
         .then((data) => {
           if (data && Array.isArray(data.streams)) {
             setStreams(data.streams)
-            if (data.streams.length > 0 && !selectedStream) {
-              setSelectedStream(data.streams[0])
+            if (data.streams.length > 0) {
+              if (!selectedStream || !data.streams.includes(selectedStream)) {
+                setSelectedStream(data.streams[0])
+              }
+            } else {
+              setSelectedStream('')
             }
           }
         })

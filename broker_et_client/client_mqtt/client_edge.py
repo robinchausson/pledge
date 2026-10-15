@@ -233,11 +233,35 @@ async def reception_flux_video(websocket, client_id):
                 if text_msg.strip().startswith('{'):
                     packet_obj = json.loads(text_msg)
                     if isinstance(packet_obj, dict):
+                        # Message explicite de transmission de clé de délégation
+                        if packet_obj.get("type") == "delegation":
+                            if edge_transcoder:
+                                edge_transcoder.set_delegation(
+                                    session_id=clean_id,
+                                    owner_id=packet_obj.get("owner_id", clean_id),
+                                    delegation_key=packet_obj.get("delegation_key"),
+                                    delegate_pk=packet_obj.get("delegate_pk"),
+                                    zone_pk=packet_obj.get("zone_pk"),
+                                )
+                                print(f"[{NODE_ID}] Clé de délégation Fog enregistrée avec succès pour session {clean_id}", flush=True)
+                            await websocket.send(json.dumps({"statut": "delegation_ok"}))
+                            continue
+
                         bloc_id = packet_obj.get("block_index", compteur_bloc)
                         if "payload_b64" in packet_obj:
                             chunk_size = len(packet_obj["payload_b64"])
                         if "signer_id" in packet_obj:
                             owner_real_id = packet_obj["signer_id"]
+
+                        # Enregistrement passif si les clés de délégation accompagnent le paquet de données
+                        if "delegation_key" in packet_obj and "delegate_pk" in packet_obj and edge_transcoder:
+                            edge_transcoder.set_delegation(
+                                session_id=clean_id,
+                                owner_id=owner_real_id,
+                                delegation_key=packet_obj["delegation_key"],
+                                delegate_pk=packet_obj["delegate_pk"],
+                                zone_pk=packet_obj.get("zone_pk"),
+                            )
             except Exception:
                 pass
 
@@ -263,7 +287,11 @@ async def reception_flux_video(websocket, client_id):
                             owner_id=real_owner,
                         )
                         trans_path = os.path.join(dossier_client, f"bloc_{b_id}_720p.dat")
-                        write_file_sync(trans_path, json.dumps(transcoded_res).encode("utf-8"))
+                        res_bytes = json.dumps(transcoded_res).encode("utf-8")
+                        write_file_sync(trans_path, res_bytes)
+                        if b_id == 0:
+                            init_720_path = os.path.join(dossier_client, "init_header_720p.dat")
+                            write_file_sync(init_720_path, res_bytes)
                     except Exception as err:
                         print(f"[{NODE_ID}] Avertissement transcodage bloc {b_id}: {err}", flush=True)
 
@@ -371,12 +399,15 @@ async def envoi_flux_video(websocket, client_id, mode="live", fmt="auto", qualit
     # Si on démarre au milieu du flux (compteur_bloc > 0) et qu'un en-tête d'initialisation WebM est disponible,
     # on l'envoie en premier pour amorcer le décodeur MSE du navigateur
     if compteur_bloc > 0:
-        init_header_file = os.path.join(dossier_client, "init_header.dat")
+        init_header_name = f"init_header{suffix}.dat" if suffix else "init_header.dat"
+        init_header_file = os.path.join(dossier_client, init_header_name)
+        if not os.path.exists(init_header_file) and suffix:
+            init_header_file = os.path.join(dossier_client, "init_header.dat")
         if os.path.exists(init_header_file):
             try:
                 with open(init_header_file, "rb") as f:
                     init_data = f.read()
-                print(f"[{NODE_ID}] Envoi de l'en-tête WebM initial pour amorcer le flux à {compteur_bloc}", flush=True)
+                print(f"[{NODE_ID}] Envoi de l'en-tête WebM initial pour amorcer le flux {quality} à {compteur_bloc}", flush=True)
                 await envoyer_bloc(init_data)
             except Exception as e:
                 print(f"[{NODE_ID}] Avertissement envoi en-tête init: {e}", flush=True)

@@ -862,29 +862,6 @@ button:disabled {
   gap: 8px;
 }
 
-.button-attack-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 10px;
-  border-radius: 5px;
-  background: rgba(239, 68, 68, 0.12);
-  border: 1px solid rgba(239, 68, 68, 0.35);
-  color: #f87171;
-  font-size: 11.5px;
-  font-weight: 600;
-  transition: all 0.18s ease;
-}
-
-.button-attack-toggle:hover {
-  background: rgba(239, 68, 68, 0.22);
-}
-
-.button-attack-toggle.active {
-  background: #dc2626;
-  border-color: #ef4444;
-  color: #ffffff;
-}
 
 .clean-technical-drawer {
   padding-top: 12px;

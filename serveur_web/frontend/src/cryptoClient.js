@@ -299,6 +299,32 @@ export function verifyHessIBS(vData, signature, ownerId, zonePk, paramA = DEFAUL
   }
 }
 
+/**
+ * Génération de la clé de délégation par l'Owner vers un nœud Fog (Section 3.6.1 de l'article).
+ * y in Z_p*, PKd = y * G2
+ * DKd = Sw + y * H1(IDd) in G1
+ */
+export function generateDelegationKey(ownerSecretKeyJson, delegateId) {
+  const Sw = jsonToG1(ownerSecretKeyJson)
+  const randBytes = new Uint8Array(32)
+  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+    crypto.getRandomValues(randBytes)
+  } else {
+    for (let i = 0; i < 32; i++) randBytes[i] = Math.floor(Math.random() * 256)
+  }
+  const y = (BigInt('0x' + bytesToHex(sha256(randBytes))) % (CURVE_ORDER - 1n)) + 1n
+
+  const pkD = G2.Point.BASE.multiply(y)
+  const h1Delegate = hashH1ToG1(delegateId)
+  const yH1 = h1Delegate.multiply(y)
+  const dkD = Sw.add(yH1)
+
+  return {
+    delegationKey: g1ToJson(dkD),
+    delegatePk: g2ToJson(pkD),
+  }
+}
+
 export function verifyDelegatedHessIBS(vData, signature, ownerId, zonePk, delegateId, delegatePk, paramA = DEFAULT_PARAM_A) {
   try {
     const w1 = BigInt(signature.w1)

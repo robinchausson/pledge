@@ -45,8 +45,13 @@ async def lifespan(app: FastAPI):
             admin = User(email="admin@admin.com", hashed_password=hashed_pwd, role="admin")
             db.add(admin)
             db.commit()
+
+        # Nettoyage des anciennes sessions au démarrage (supprime la mémoire des streams précédents)
+        db.query(StreamSession).filter(StreamSession.status == "live").update({"status": "stopped"})
+        db.query(DataLocation).delete()
+        db.commit()
     except Exception as e:
-        print(f"Erreur init admin: {e}", flush=True)
+        print(f"Erreur init admin/sessions: {e}", flush=True)
     finally:
         db.close()
 
@@ -250,7 +255,37 @@ def get_edge_nodes(db: Session = Depends(get_db), current_user: User = Depends(g
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="Accès refusé")
 
-    nodes = db.query(EdgeNode).all()
+    now = datetime.datetime.utcnow()
+    threshold = now - datetime.timedelta(seconds=60)
+
+    # Nœuds actifs récents (vrais nœuds connectés ayant envoyé de la télémétrie)
+    real_nodes = (
+        db.query(EdgeNode)
+        .filter(EdgeNode.node_id != "Edge_Node_01")
+        .filter(EdgeNode.last_seen >= threshold)
+        .all()
+    )
+
+    if real_nodes:
+        nodes = real_nodes
+    else:
+        # Nœud par défaut jusqu'à ce que des vrais nœuds se connectent
+        default_node = db.query(EdgeNode).filter(EdgeNode.node_id == "Edge_Node_01").first()
+        if not default_node:
+            default_node = EdgeNode(
+                node_id="Edge_Node_01",
+                zone_id="Zone_1",
+                ip_address="127.0.0.1",
+                wss_port=8444,
+                storage_available_gb=50.0,
+                cpu_usage_pct=10.0,
+                last_seen=now,
+            )
+            db.add(default_node)
+            db.commit()
+            db.refresh(default_node)
+        nodes = [default_node]
+
     zones = {}
     for node in nodes:
         if node.zone_id not in zones:
@@ -268,11 +303,23 @@ def get_edge_nodes(db: Session = Depends(get_db), current_user: User = Depends(g
 
 @app.get("/api/streams/active")
 def get_active_streams(db: Session = Depends(get_db)):
-    """Retourne uniquement les flux en cours de diffusion (live et récents)."""
+    """Retourne uniquement les flux actuellement et activement en cours de diffusion."""
     now = datetime.datetime.utcnow()
-    recent_threshold = now - datetime.timedelta(seconds=25)
+    recent_threshold = now - datetime.timedelta(seconds=20)
 
-    # 1. Sessions marquées live et actives récemment
+    # 1. Marquer comme 'stopped' les sessions live périmées (aucun battement de cœur depuis 20s)
+    stale_sessions = (
+        db.query(StreamSession)
+        .filter(StreamSession.status == "live")
+        .filter(StreamSession.last_active < recent_threshold)
+        .all()
+    )
+    if stale_sessions:
+        for s in stale_sessions:
+            s.status = "stopped"
+        db.commit()
+
+    # 2. Récupérer uniquement les sessions formellement en direct et récentes
     live_sessions = (
         db.query(StreamSession)
         .filter(StreamSession.status == "live")
@@ -281,15 +328,7 @@ def get_active_streams(db: Session = Depends(get_db)):
     )
     active_stream_ids = [s.session_id for s in live_sessions]
 
-    # 2. Si aucune session formelle trouvée, vérifier les données actives récentes
-    if not active_stream_ids:
-        # Fallback pour compatibilité
-        recent_locations = db.query(DataLocation).filter(DataLocation.blocks_count > 0).all()
-        # N'inclut que si le nœud hôte est toujours actif
-        active_nodes = {n.node_id for n in db.query(EdgeNode).filter(EdgeNode.last_seen >= now - datetime.timedelta(seconds=60)).all()}
-        active_stream_ids = [loc.client_id for loc in recent_locations if loc.node_id in active_nodes]
-
-    # Déduplication
+    # Pas de mémoire fantôme : s'il n'y a pas de flux live émettant activement, la liste est vide
     unique_streams = list(dict.fromkeys(active_stream_ids))
     return {"streams": unique_streams}
 
