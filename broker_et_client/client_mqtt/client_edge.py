@@ -246,6 +246,11 @@ async def reception_flux_video(websocket, client_id):
             # Délégation de l'écriture disque au ThreadPool pour ne pas bloquer l'event loop
             await loop.run_in_executor(io_executor, write_file_sync, chemin_fichier, raw_data)
 
+            # Conservation de l'en-tête d'initialisation WebM (bloc 0) pour amorcer les spectateurs tardifs
+            if bloc_id == 0:
+                init_hdr_path = os.path.join(dossier_client, "init_header.dat")
+                await loop.run_in_executor(io_executor, write_file_sync, init_hdr_path, raw_data)
+
             # Phase 3 : Worker de Transcodage Edge et re-signature déléguée (Section 3.6.2)
             if edge_transcoder:
                 def transcode_and_save_worker(raw_bytes, b_id, real_owner):
@@ -345,10 +350,36 @@ async def envoi_flux_video(websocket, client_id, mode="live", fmt="auto", qualit
     with active_viewers_lock:
         active_viewers[clean_id] = active_viewers.get(clean_id, 0) + 1
 
-    # Amorçage séquentiel depuis le bloc 0 pour garantir l'envoi de l'en-tête WebM (MSE)
-    # sans rupture de continuité temporelle
+    # Amorçage séquentiel depuis le bloc disponible le plus ancien (bloc 0 si présent, sinon min)
     compteur_bloc = 0
-    print(f"[{NODE_ID}] Lecture {clean_id} : démarrage séquentiel depuis bloc 0 (mode={mode}, dernier={dernier_bloc})", flush=True)
+    if os.path.exists(dossier_client):
+        try:
+            bloc_files = [
+                int(f.split("_")[1].split(".")[0])
+                for f in os.listdir(dossier_client)
+                if f.startswith("bloc_") and f.endswith(".dat") and f.split("_")[1].split(".")[0].isdigit()
+            ]
+            if bloc_files:
+                dernier_bloc = max(bloc_files)
+                if 0 not in bloc_files:
+                    compteur_bloc = min(bloc_files)
+        except Exception:
+            pass
+
+    print(f"[{NODE_ID}] Lecture {clean_id} : démarrage séquentiel depuis bloc {compteur_bloc} (mode={mode}, dernier={dernier_bloc})", flush=True)
+
+    # Si on démarre au milieu du flux (compteur_bloc > 0) et qu'un en-tête d'initialisation WebM est disponible,
+    # on l'envoie en premier pour amorcer le décodeur MSE du navigateur
+    if compteur_bloc > 0:
+        init_header_file = os.path.join(dossier_client, "init_header.dat")
+        if os.path.exists(init_header_file):
+            try:
+                with open(init_header_file, "rb") as f:
+                    init_data = f.read()
+                print(f"[{NODE_ID}] Envoi de l'en-tête WebM initial pour amorcer le flux à {compteur_bloc}", flush=True)
+                await envoyer_bloc(init_data)
+            except Exception as e:
+                print(f"[{NODE_ID}] Avertissement envoi en-tête init: {e}", flush=True)
 
     inactivity_counter = 0
     MAX_WAIT_SECONDS = 20

@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import sys
 from typing import Any, Dict, Optional, Tuple
 
@@ -60,12 +61,15 @@ class EdgeTranscoder:
         zone_pk: Optional[Any] = None,
     ):
         """Enregistre manuellement ou après réception une clé de délégation."""
-        self.delegations[session_id] = {
+        del_info = {
             "owner_id": owner_id,
             "delegation_key": delegation_key,
             "delegate_pk": delegate_pk,
             "zone_pk": zone_pk,
         }
+        self.delegations[session_id] = del_info
+        clean_id = re.sub(r'[^a-zA-Z0-9_\-.]', '_', session_id.strip())
+        self.delegations[clean_id] = del_info
 
     def ensure_delegation(
         self,
@@ -238,6 +242,7 @@ class EdgeTranscoder:
                 "zone_pk": delegation.get("zone_pk"),
                 "paramA": active_param_a,
                 "V_matrix": v_prime,
+                "V_column": v_prime,
                 "signature": sig_delegated,
             },
         }

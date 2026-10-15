@@ -182,6 +182,13 @@ export function hashH1ToG1(identity) {
   }
 }
 
+export function legacyHashH1ToG1(identity) {
+  const cleanId = String(identity || '').trim()
+  const digest = sha256(new TextEncoder().encode(cleanId))
+  const scalar = (BigInt('0x' + bytesToHex(digest)) % (CURVE_ORDER - 1n)) + 1n
+  return G1.Point.BASE.multiply(scalar)
+}
+
 export function hashH2(vRepr, paramARepr, fp12) {
   const msg = `${vRepr}|${paramARepr}|${serializeFp12(fp12)}`
   const digest = sha256(new TextEncoder().encode(msg))
@@ -276,6 +283,16 @@ export function verifyHessIBS(vData, signature, ownerId, zonePk, paramA = DEFAUL
     if (expectedW1 === w1) {
       return { valid: true, detail: 'Signature Hess-IBS vérifiée avec succès' }
     }
+
+    // Tolérance de transition : test avec l'ancienne dérivation scalaire H1 (flux non rafraîchis)
+    const legH1 = legacyHashH1ToG1(ownerId)
+    const legNegH1Scaled = legH1.negate().multiply(w1 % CURVE_ORDER)
+    const legTerm2 = pairing(legNegH1Scaled, pkPoint)
+    const legRPrime = Fp12.mul(term1, legTerm2)
+    if (hashH2(vRepr, paramRepr, legRPrime) === w1) {
+      return { valid: true, detail: 'Signature Hess-IBS vérifiée avec succès (mode transition)' }
+    }
+
     return { valid: false, detail: 'Échec du challenge cryptographique H2 (w1 !== w1_prime)' }
   } catch (err) {
     return { valid: false, detail: `Erreur vérification Hess-IBS : ${err.message}` }
@@ -307,6 +324,19 @@ export function verifyDelegatedHessIBS(vData, signature, ownerId, zonePk, delega
     if (expectedW1 === w1) {
       return { valid: true, detail: 'Signature déléguée Fog vérifiée avec succès' }
     }
+
+    // Tolérance de transition : test avec l'ancienne dérivation scalaire H1
+    const legH1Owner = legacyHashH1ToG1(ownerId)
+    const legNegOwner = legH1Owner.negate().multiply(w1 % CURVE_ORDER)
+    const legH1Del = legacyHashH1ToG1(delegateId)
+    const legNegDel = legH1Del.negate().multiply(w1 % CURVE_ORDER)
+    const legTerm2 = pairing(legNegOwner, pkPoint)
+    const legTerm3 = pairing(legNegDel, delPkPoint)
+    const legRPrime = Fp12.mul(Fp12.mul(term1, legTerm2), legTerm3)
+    if (hashH2(vRepr, paramRepr, legRPrime) === w1) {
+      return { valid: true, detail: 'Signature déléguée Fog vérifiée avec succès (mode transition)' }
+    }
+
     return { valid: false, detail: 'Échec du challenge cryptographique H2 délégué' }
   } catch (err) {
     return { valid: false, detail: `Erreur vérification déléguée : ${err.message}` }

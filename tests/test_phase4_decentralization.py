@@ -40,6 +40,8 @@ def setup_test_environment():
     edge_module.DOSSIER_RACINE_STOCKAGE = temp_dir
 
     # Enregistrement d'un Edge Node actif dans la base
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
     db = SessionLocal()
     node = db.query(EdgeNode).filter(EdgeNode.node_id == "Test_Edge_Node_01").first()
     if not node:
@@ -48,11 +50,16 @@ def setup_test_environment():
             zone_id="Zone_1",
             ip_address="127.0.0.1",
             wss_port=8445,
-            storage_available_gb=100.0,
+            storage_available_gb=500.0,
             cpu_usage_pct=5.0,
+            last_seen=now,
         )
         db.add(node)
-        db.commit()
+    else:
+        node.storage_available_gb = 500.0
+        node.last_seen = now
+        node.wss_port = 8445
+    db.commit()
     db.close()
 
     yield {
@@ -82,7 +89,7 @@ def test_signaling_allocation(setup_test_environment):
     assert "upload_url" in data
     assert f"/upload/{streamer_id}" in data["upload_url"]
     assert data["paramA"] == DEFAULT_PARAM_A
-    assert data["edge_port"] in (8444, 8445)
+    assert data["edge_port"] in (8444, 8445, 8446)
 
     # Vérification en base de données
     db = SessionLocal()

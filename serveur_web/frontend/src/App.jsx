@@ -310,181 +310,203 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
         discovery.edge_host === 'localhost' ||
         discovery.edge_host === 'host.docker.internal'
       const edgeHost = isLocalHost ? window.location.hostname : discovery.edge_host
+      let token = discovery.token
+      if (!token && discovery.download_url) {
+        try {
+          const u = new URL(discovery.download_url)
+          token = u.searchParams.get('token')
+        } catch (_) {}
+      }
+      const tokenParam = token ? `&token=${encodeURIComponent(token)}` : ''
       const directDownloadUrl = `${discovery.scheme || 'ws'}://${edgeHost}:${discovery.edge_port}/download/${encodeURIComponent(
         targetId
-      )}?mode=start&quality=${q}`
+      )}?mode=start&quality=${q}${tokenParam}`
 
+      const mediaSource = new MediaSource()
+      const mediaSourceUrl = URL.createObjectURL(mediaSource)
+      let sourceBuffer = null
+      const queue = []
+      let retryTimeout = null
+      let appendRetryCount = 0
+
+      function processQueue() {
+        if (!sourceBuffer || sourceBuffer.updating || queue.length === 0) return
+        if (mediaSource.readyState !== 'open') return
+
+        const next = queue.shift()
+        try {
+          sourceBuffer.appendBuffer(next)
+          appendRetryCount = 0
+        } catch (e) {
+          console.warn('appendBuffer avertissement:', e)
+          appendRetryCount++
+          if (appendRetryCount < 3) {
+            queue.unshift(next)
+            if (!retryTimeout) {
+              retryTimeout = setTimeout(() => {
+                retryTimeout = null
+                processQueue()
+              }, 50)
+            }
+          } else {
+            appendRetryCount = 0
+          }
+        }
+      }
+
+      const handleGapNudge = () => {
+        if (!videoRef.current || !sourceBuffer) return
+        try {
+          const cur = videoRef.current.currentTime
+          const bufs = sourceBuffer.buffered
+          for (let i = 0; i < bufs.length; i++) {
+            const bStart = bufs.start(i)
+            const bEnd = bufs.end(i)
+            if (cur < bStart && bStart - cur < 0.6) {
+              videoRef.current.currentTime = bStart + 0.03
+              videoRef.current.play().catch(() => {})
+              return
+            }
+            if (Math.abs(cur - bEnd) < 0.25 && i + 1 < bufs.length) {
+              const nextStart = bufs.start(i + 1)
+              videoRef.current.currentTime = nextStart + 0.03
+              videoRef.current.play().catch(() => {})
+              return
+            }
+          }
+        } catch (_) {}
+      }
+
+      mediaSource.addEventListener(
+        'sourceopen',
+        () => {
+          const mime = MediaRecorder.isTypeSupported('video/webm; codecs=vp8,opus')
+            ? 'video/webm; codecs=vp8,opus'
+            : 'video/webm'
+          try {
+            sourceBuffer = mediaSource.addSourceBuffer(mime)
+          } catch (err) {
+            console.error('Erreur addSourceBuffer:', err)
+            return
+          }
+
+          if (videoRef.current) {
+            videoRef.current.addEventListener('waiting', handleGapNudge)
+            videoRef.current.addEventListener('stalled', handleGapNudge)
+          }
+
+          sourceBuffer.addEventListener('updateend', () => {
+            processQueue()
+            if (videoRef.current) {
+              try {
+                if (sourceBuffer.buffered.length > 0) {
+                  const bufferStart = sourceBuffer.buffered.start(0)
+                  if (videoRef.current.currentTime < bufferStart) {
+                    videoRef.current.currentTime = bufferStart
+                  }
+                }
+                handleGapNudge()
+                if (auditStatus !== 'tampered') {
+                  videoRef.current.play().catch(() => {})
+                }
+              } catch (_) {}
+            }
+          })
+
+          // Traitement immédiat des blocs déjà accumulés (bloc_0 en premier)
+          processQueue()
+        },
+        { once: true }
+      )
+
+      // Attachement immédiat de l'URL MediaSource au lecteur vidéo
+      const attachVideo = () => {
+        if (videoRef.current) {
+          videoRef.current.src = mediaSourceUrl
+        } else {
+          setTimeout(attachVideo, 25)
+        }
+      }
+      attachVideo()
+
+      // Connexion WebSocket avec écouteur onmessage immédiat pour ne perdre aucun bloc (notamment bloc 0)
       const socket = new WebSocket(directDownloadUrl)
       socket.binaryType = 'arraybuffer'
 
-      const mediaSource = new MediaSource()
-      setTimeout(() => {
-        if (videoRef.current) {
-          videoRef.current.src = URL.createObjectURL(mediaSource)
-        }
-      }, 50)
+      socket.onmessage = async (event) => {
+        let chunk = null
+        let packet = null
 
-      mediaSource.addEventListener('sourceopen', () => {
-        const mime = MediaRecorder.isTypeSupported('video/webm; codecs=vp8,opus')
-          ? 'video/webm; codecs=vp8,opus'
-          : 'video/webm'
-        let sourceBuffer
-        try {
-          sourceBuffer = mediaSource.addSourceBuffer(mime)
-        } catch (err) {
-          console.error('Erreur addSourceBuffer:', err)
-          return
-        }
-
-        const queue = []
-        let retryTimeout = null
-        let appendRetryCount = 0
-
-        function processQueue() {
-          if (!sourceBuffer || sourceBuffer.updating || queue.length === 0) return
-          if (mediaSource.readyState !== 'open') return
-
-          const next = queue.shift()
+        if (typeof event.data === 'string') {
           try {
-            sourceBuffer.appendBuffer(next)
-            appendRetryCount = 0
-          } catch (e) {
-            appendRetryCount++
-            if (appendRetryCount < 3) {
-              queue.unshift(next)
-              if (!retryTimeout) {
-                retryTimeout = setTimeout(() => {
-                  retryTimeout = null
-                  processQueue()
-                }, 50)
-              }
-            } else {
-              appendRetryCount = 0
-            }
-          }
-        }
-
-        const handleGapNudge = () => {
-          if (!videoRef.current || !sourceBuffer) return
-          try {
-            const cur = videoRef.current.currentTime
-            const bufs = sourceBuffer.buffered
-            for (let i = 0; i < bufs.length; i++) {
-              const bStart = bufs.start(i)
-              const bEnd = bufs.end(i)
-              if (cur < bStart && bStart - cur < 0.6) {
-                videoRef.current.currentTime = bStart + 0.03
-                videoRef.current.play().catch(() => {})
-                return
-              }
-              if (Math.abs(cur - bEnd) < 0.25 && i + 1 < bufs.length) {
-                const nextStart = bufs.start(i + 1)
-                videoRef.current.currentTime = nextStart + 0.03
-                videoRef.current.play().catch(() => {})
-                return
-              }
-            }
+            packet = JSON.parse(event.data)
+            const b64 = packet?.payload_b64 || packet?.chunk_b64
+            if (b64) chunk = base64ToUint8Array(b64)
           } catch (_) {}
-        }
-
-        if (videoRef.current) {
-          videoRef.current.addEventListener('waiting', handleGapNudge)
-          videoRef.current.addEventListener('stalled', handleGapNudge)
-        }
-
-        sourceBuffer.addEventListener('updateend', () => {
-          processQueue()
-          if (videoRef.current) {
-            try {
-              if (sourceBuffer.buffered.length > 0) {
-                const bufferStart = sourceBuffer.buffered.start(0)
-                if (videoRef.current.currentTime < bufferStart) {
-                  videoRef.current.currentTime = bufferStart
-                }
-              }
-              handleGapNudge()
-              if (auditStatus !== 'tampered') {
-                videoRef.current.play().catch(() => {})
-              }
-            } catch (_) {}
-          }
-        })
-
-        socket.onmessage = async (event) => {
-          let chunk = null
-          let packet = null
-
-          if (typeof event.data === 'string') {
-            try {
-              packet = JSON.parse(event.data)
+        } else if (event.data instanceof ArrayBuffer) {
+          try {
+            const text = new TextDecoder().decode(event.data)
+            if (text.trim().startsWith('{')) {
+              packet = JSON.parse(text)
               const b64 = packet?.payload_b64 || packet?.chunk_b64
               if (b64) chunk = base64ToUint8Array(b64)
-            } catch (_) {}
-          } else if (event.data instanceof ArrayBuffer) {
-            try {
-              const text = new TextDecoder().decode(event.data)
-              if (text.trim().startsWith('{')) {
-                packet = JSON.parse(text)
-                const b64 = packet?.payload_b64 || packet?.chunk_b64
-                if (b64) chunk = base64ToUint8Array(b64)
-              }
-            } catch (_) {}
-            if (!chunk) chunk = new Uint8Array(event.data)
-          }
-
-          if (!chunk) return
-
-          // Simulation d'altération en transit pour démonstration
-          if (simulateTamperRef.current) {
-            chunk[0] ^= 0x55
-          }
-
-          // VÉRIFICATION D'INTÉGRITÉ CÔTÉ SPECTATEUR (Phase 5)
-          if (packet) {
-            setLastPacketData(packet)
-            const audit = verifyIncomingBlock(chunk, packet, defaultZonePk)
-
-            if (!audit.isValid) {
-              setAuditStatus('tampered')
-              setAuditMetrics((m) => ({
-                ...m,
-                tamperedCount: m.tamperedCount + 1,
-                sisTimeMs: audit.sisTimeMs,
-                sigTimeMs: audit.sigTimeMs,
-                totalTimeMs: audit.totalTimeMs,
-                lastDetail: audit.detail,
-              }))
-              if (videoRef.current) {
-                videoRef.current.pause()
-              }
-              return
-            } else {
-              setAuditStatus(audit.isDelegated ? 'delegated' : 'intact')
-              setAuditMetrics((m) => ({
-                ...m,
-                verifiedCount: m.verifiedCount + 1,
-                sisTimeMs: audit.sisTimeMs,
-                sigTimeMs: audit.sigTimeMs,
-                totalTimeMs: audit.totalTimeMs,
-                lastDetail: audit.detail,
-              }))
             }
-          }
+          } catch (_) {}
+          if (!chunk) chunk = new Uint8Array(event.data)
+        }
 
-          setChunksReceived((c) => c + 1)
-          queue.push(chunk)
-          processQueue()
+        if (!chunk) return
 
-          if (videoRef.current && videoRef.current.paused && auditStatus !== 'tampered') {
-            videoRef.current.play().catch(() => {
-              if (videoRef.current) {
-                videoRef.current.muted = true
-                videoRef.current.play().catch(() => {})
-              }
-            })
+        // Simulation d'altération en transit pour démonstration
+        if (simulateTamperRef.current) {
+          chunk[0] ^= 0x55
+        }
+
+        // VÉRIFICATION D'INTÉGRITÉ CÔTÉ SPECTATEUR (Phase 5)
+        if (packet) {
+          setLastPacketData(packet)
+          const audit = verifyIncomingBlock(chunk, packet, defaultZonePk)
+
+          if (!audit.isValid) {
+            setAuditStatus('tampered')
+            setAuditMetrics((m) => ({
+              ...m,
+              tamperedCount: m.tamperedCount + 1,
+              sisTimeMs: audit.sisTimeMs,
+              sigTimeMs: audit.sigTimeMs,
+              totalTimeMs: audit.totalTimeMs,
+              lastDetail: audit.detail,
+            }))
+            if (videoRef.current) {
+              videoRef.current.pause()
+            }
+            return
+          } else {
+            setAuditStatus(audit.isDelegated ? 'delegated' : 'intact')
+            setAuditMetrics((m) => ({
+              ...m,
+              verifiedCount: m.verifiedCount + 1,
+              sisTimeMs: audit.sisTimeMs,
+              sigTimeMs: audit.sigTimeMs,
+              totalTimeMs: audit.totalTimeMs,
+              lastDetail: audit.detail,
+            }))
           }
         }
-      })
+
+        setChunksReceived((c) => c + 1)
+        queue.push(chunk)
+        processQueue()
+
+        if (videoRef.current && videoRef.current.paused && auditStatus !== 'tampered') {
+          videoRef.current.play().catch(() => {
+            if (videoRef.current) {
+              videoRef.current.muted = true
+              videoRef.current.play().catch(() => {})
+            }
+          })
+        }
+      }
 
       socket.onclose = () => {
         setWatching(false)
@@ -777,9 +799,17 @@ function StreamerInterface({ user }) {
         alloc.edge_host === 'localhost' ||
         alloc.edge_host === 'host.docker.internal'
       const edgeHost = isLocalHost ? window.location.hostname : alloc.edge_host
+      let token = alloc.token
+      if (!token && alloc.upload_url) {
+        try {
+          const u = new URL(alloc.upload_url)
+          token = u.searchParams.get('token')
+        } catch (_) {}
+      }
+      const tokenParam = token ? `?token=${encodeURIComponent(token)}` : ''
       const directUploadUrl = `${alloc.scheme || 'ws'}://${edgeHost}:${alloc.edge_port}/upload/${encodeURIComponent(
         user.email
-      )}`
+      )}${tokenParam}`
 
       const socket = new WebSocket(directUploadUrl)
       blockIndexRef.current = 0
