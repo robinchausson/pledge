@@ -5,4 +5,8 @@ __pycache__
 .venv
 venv
 certs/
+.env
+.env.*
+tests/
+.pytest_cache/
 .git

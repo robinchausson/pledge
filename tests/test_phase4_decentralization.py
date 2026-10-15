@@ -26,6 +26,7 @@ sys.path.insert(0, str(client_mqtt_dir))
 from main import app
 from models import SessionLocal, EdgeNode, StreamSession, DataLocation
 from stream_router import DEFAULT_PARAM_A
+from security import create_stream_token
 
 # 2. Imports du nœud Edge
 import client_edge as edge_module
@@ -149,8 +150,18 @@ async def test_direct_edge_p2p_data_plane(setup_test_environment):
     server = await websockets.serve(edge_module.routeur_ws, "127.0.0.1", port)
 
     try:
+        # 0. SÉCURITÉ : Vérifier le rejet 1008 en l'absence de token valide
+        with pytest.raises(websockets.exceptions.ConnectionClosed) as exc_info:
+            async with websockets.connect(f"ws://127.0.0.1:{port}/upload/{session_id}") as unauth_ws:
+                await unauth_ws.recv()
+        assert exc_info.value.rcvd.code == 1008
+
+        # Génération des tokens signés
+        token_streamer = create_stream_token(session_id, role="streamer", node_id="Test_Edge_Node_01")
+        token_viewer = create_stream_token(session_id, role="viewer", node_id="Test_Edge_Node_01")
+
         # 1. STREAMER : Connexion directe au Edge pour uploader des paquets Phase 4
-        upload_url = f"ws://127.0.0.1:{port}/upload/{session_id}"
+        upload_url = f"ws://127.0.0.1:{port}/upload/{session_id}?token={token_streamer}"
         async with websockets.connect(upload_url) as streamer_ws:
             # Bloc 0 : En-tête d'initialisation WebM
             init_payload = b"FAKE_WEBM_EBML_HEADER_DATA_BLOCK_0"
@@ -185,7 +196,7 @@ async def test_direct_edge_p2p_data_plane(setup_test_environment):
             assert ack_1["bloc_id"] == 1
 
         # 2. SPECTATEUR : Connexion directe au Edge pour télécharger les blocs
-        download_url = f"ws://127.0.0.1:{port}/download/{session_id}?mode=start"
+        download_url = f"ws://127.0.0.1:{port}/download/{session_id}?mode=start&token={token_viewer}"
         async with websockets.connect(download_url) as viewer_ws:
             # Réception du Bloc 0
             rec_0 = await viewer_ws.recv()
@@ -203,7 +214,7 @@ async def test_direct_edge_p2p_data_plane(setup_test_environment):
             assert data_1["V_column"] == [40, 50, 60]
 
         # 3. SPECTATEUR EN MODE RAW (Vérification de la compatibilité binaire)
-        download_raw_url = f"ws://127.0.0.1:{port}/download/{session_id}?mode=start&format=raw"
+        download_raw_url = f"ws://127.0.0.1:{port}/download/{session_id}?mode=start&format=raw&token={token_viewer}"
         async with websockets.connect(download_raw_url) as viewer_raw_ws:
             raw_rec_0 = await viewer_raw_ws.recv()
             assert raw_rec_0 == init_payload

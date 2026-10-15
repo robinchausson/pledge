@@ -1,6 +1,7 @@
 # Certificats TLS générés localement
-streamer-agent/certs/*.key
-streamer-agent/certs/*.crt
+certs/*.key
+certs/*.crt
+certs/*.pem
 
 # Python
 __pycache__/

@@ -4,3 +4,4 @@ websockets==11.0.3
 httpx
 numpy
 py_ecc
+PyJWT

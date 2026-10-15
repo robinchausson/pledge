@@ -127,7 +127,8 @@ class SignRequest(BaseModel):
     param_a: Union[dict, int, None] = Field(None, alias="paramA")
     owner_identity: Optional[str] = Field(None, description="Identité de l'émetteur pour auto-génération de S_w")
 class DelegationIssueRequest(BaseModel):
-    delegate_identity: str = Field(..., description="Identifiant du nœud Fog délégué (DS_d)")
+    delegate_identity: Optional[str] = Field(None, description="Identifiant du nœud Fog délégué (DS_d)")
+    delegate_id: Optional[str] = Field(None, description="Alias pour delegate_identity")
     owner_secret_key: Optional[List[int]] = Field(None, description="Clé secrète S_w de l'owner [x, y]")
     owner_identity: Optional[str] = Field(None, description="Identité de l'owner si S_w doit être généré par le serveur")
 
@@ -142,7 +143,6 @@ class DelegatedSignRequest(BaseModel):
 class VerifyRequest(BaseModel):
     v_matrix: List[int] = Field(..., alias="V_matrix", description="Vecteur SIS v_i")
     signature: dict = Field(..., description="Signature Hess-IBS {w1, w2, p1}")
-    owner_identity: Optional[str] = Field("streamer@pledge.local", description="Identité Ow")
     owner_identity: Optional[str] = Field("streamer@pledge.local", description="Identité Ow")
     zone_pk: Optional[List[List[int]]] = Field(None, description="Clé publique de zone PK_s")
     param_a: Union[dict, int, None] = Field(None, alias="paramA")
@@ -445,6 +445,8 @@ class DynamicInsertRequest(BaseModel):
     block_index: int = Field(..., description="Index k d'insertion")
     block_data_b64: str = Field(..., description="Données du nouveau bloc en Base64")
     param_a: Union[dict, int, None] = Field(None, alias="paramA")
+    secret_share: Optional[List[int]] = Field(None, description="Part secrète Sw de l'owner [x, y]")
+    owner_identity: Optional[str] = Field(None, description="Identité de l'owner pour signature")
 
 
 class DynamicModifyRequest(BaseModel):
@@ -452,18 +454,33 @@ class DynamicModifyRequest(BaseModel):
     block_index: int = Field(..., description="Index k de modification")
     block_data_b64: str = Field(..., description="Nouvelles données du bloc en Base64")
     param_a: Union[dict, int, None] = Field(None, alias="paramA")
+    secret_share: Optional[List[int]] = Field(None, description="Part secrète Sw de l'owner [x, y]")
+    owner_identity: Optional[str] = Field(None, description="Identité de l'owner pour signature")
 
 
 class DynamicDeleteRequest(BaseModel):
     v_matrix: List[List[int]] = Field(..., description="Matrice V existante (l x N)")
     block_index: int = Field(..., description="Index k de suppression")
+    param_a: Union[dict, int, None] = Field(None, alias="paramA")
+    secret_share: Optional[List[int]] = Field(None, description="Part secrète Sw de l'owner [x, y]")
+    owner_identity: Optional[str] = Field(None, description="Identité de l'owner pour signature")
+
+
+def _try_sign_matrix(v_matrix: list, secret_share: Optional[list], owner_identity: Optional[str], param_a: dict) -> Optional[dict]:
+    """Calcule la signature Hess-IBS sur la matrice V mise à jour (Section 3.5)."""
+    if secret_share:
+        secret_key = json_to_g1(secret_share)
+        return sign_data(v_matrix, secret_key, param_a)
+    elif owner_identity and state.master_secret:
+        secret_key = compute_secret_share(state.master_secret, owner_identity)
+        return sign_data(v_matrix, secret_key, param_a)
+    return None
 
 
 @app.post("/api/v1/crypto/dynamic/insert")
 def dynamic_insert_endpoint(request: DynamicInsertRequest) -> dict:
     """
-    Section 3.5.1 : Insertion de bloc à la position k.
-    Met à jour la matrice V en insérant une colonne v'_k calculée via SIS.
+    Section 3.5.3 : Insertion de bloc à la position k et re-signature.
     """
     param_a = normalize_param_a(request.param_a)
     block_bytes = decode_fragment(request.block_data_b64)
@@ -479,12 +496,14 @@ def dynamic_insert_endpoint(request: DynamicInsertRequest) -> dict:
         index=request.block_index,
         param_a=param_a,
     )
+    sig = _try_sign_matrix(updated_v, request.secret_share, request.owner_identity, param_a)
     return {
         "status": "success",
         "operation": "insert",
         "block_index": request.block_index,
         "new_column": new_col,
         "v_matrix": updated_v,
+        "signature": sig,
         "total_blocks": len(updated_v[0]) if updated_v else 0,
     }
 
@@ -492,8 +511,7 @@ def dynamic_insert_endpoint(request: DynamicInsertRequest) -> dict:
 @app.post("/api/v1/crypto/dynamic/modify")
 def dynamic_modify_endpoint(request: DynamicModifyRequest) -> dict:
     """
-    Section 3.5.2 : Modification du bloc k.
-    Met à jour la colonne k de la matrice V.
+    Section 3.5.2 : Modification du bloc k et re-signature.
     """
     param_a = normalize_param_a(request.param_a)
     block_bytes = decode_fragment(request.block_data_b64)
@@ -509,12 +527,14 @@ def dynamic_modify_endpoint(request: DynamicModifyRequest) -> dict:
         index=request.block_index,
         param_a=param_a,
     )
+    sig = _try_sign_matrix(updated_v, request.secret_share, request.owner_identity, param_a)
     return {
         "status": "success",
         "operation": "modify",
         "block_index": request.block_index,
         "new_column": new_col,
         "v_matrix": updated_v,
+        "signature": sig,
         "total_blocks": len(updated_v[0]) if updated_v else 0,
     }
 
@@ -522,9 +542,9 @@ def dynamic_modify_endpoint(request: DynamicModifyRequest) -> dict:
 @app.post("/api/v1/crypto/dynamic/delete")
 def dynamic_delete_endpoint(request: DynamicDeleteRequest) -> dict:
     """
-    Section 3.5.3 : Suppression du bloc k.
-    Supprime la colonne k de la matrice V.
+    Section 3.5.1 : Suppression du bloc k et re-signature.
     """
+    param_a = normalize_param_a(request.param_a)
     if not request.v_matrix or len(request.v_matrix) != SIS_L:
         raise HTTPException(status_code=400, detail=f"La matrice V doit comporter {SIS_L} lignes")
     num_cols = len(request.v_matrix[0])
@@ -535,11 +555,13 @@ def dynamic_delete_endpoint(request: DynamicDeleteRequest) -> dict:
         matrix_v=request.v_matrix,
         index=request.block_index,
     )
+    sig = _try_sign_matrix(updated_v, request.secret_share, request.owner_identity, param_a)
     return {
         "status": "success",
         "operation": "delete",
         "block_index": request.block_index,
         "v_matrix": updated_v,
+        "signature": sig,
         "total_blocks": len(updated_v[0]) if updated_v else 0,
     }
 

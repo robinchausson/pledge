@@ -1,15 +1,18 @@
 services:
   broker_mqtt:
-    image: eclipse-mosquitto:latest
+    build: .
+    image: pledge-broker-mqtt:latest
     container_name: broker_zone
     restart: unless-stopped
     ports:
+      - "${MQTTS_PORT:-8883}:8883"
       - "${MQTT_PORT:-1883}:1883"
     volumes:
       - ./mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - ./certs:/mosquitto/certs
       - mosquitto_data:/mosquitto/data
     healthcheck:
-      test: ["CMD-SHELL", "timeout 2 nc -z 127.0.0.1 1883 || exit 0"]
+      test: ["CMD-SHELL", "timeout 2 nc -z 127.0.0.1 8883 || timeout 2 nc -z 127.0.0.1 1883 || exit 0"]
       interval: 15s
       timeout: 5s
       retries: 3

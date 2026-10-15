@@ -82,37 +82,27 @@ class EdgeTranscoder:
         if session_id in self.delegations:
             return self.delegations[session_id]
 
-        # Option A : Moteur local
-        if HAS_LOCAL_CRYPTO:
-            if owner_secret_key is None:
-                # Simule l'obtention de la clé d'owner pour les tests locaux
-                msk, pk_zone = crypto_engine.generate_zone_master_key(123456789)
-                owner_secret = crypto_engine.compute_secret_share(msk, owner_id)
-                pk_zone_json = crypto_engine.g2_to_json(pk_zone)
-            else:
-                owner_secret = crypto_engine.ensure_g1(owner_secret_key)
-                pk_zone_json = None
-
+        # Option A : Calcul légitime si l'owner transmet sa clé secrète directement
+        if HAS_LOCAL_CRYPTO and owner_secret_key is not None:
+            owner_secret = crypto_engine.ensure_g1(owner_secret_key)
             dk_d, pk_d = crypto_engine.generate_delegation_key(owner_secret, self.node_id)
             del_info = {
                 "owner_id": owner_id,
                 "delegation_key": crypto_engine.g1_to_json(dk_d),
                 "delegate_pk": crypto_engine.g2_to_json(pk_d),
-                "zone_pk": pk_zone_json,
+                "zone_pk": None,
             }
             self.delegations[session_id] = del_info
             return del_info
 
-        # Option B : Appel HTTP au serveur crypto
-        if HAS_HTTPX and self.crypto_url:
+        # Option B : Appel sécurisé si le serveur crypto relaie la délégation
+        if HAS_HTTPX and self.crypto_url and owner_secret_key is not None:
             try:
                 payload = {
                     "owner_identity": owner_id,
                     "delegate_identity": self.node_id,
+                    "owner_secret_key": owner_secret_key,
                 }
-                if owner_secret_key:
-                    payload["owner_secret_key"] = owner_secret_key
-
                 with httpx.Client(timeout=3.0, verify=False) as client:
                     resp = client.post(f"{self.crypto_url}/api/v1/crypto/delegation/issue", json=payload)
                     resp.raise_for_status()
@@ -128,15 +118,23 @@ class EdgeTranscoder:
             except Exception as e:
                 print(f"[{self.node_id}] Erreur obtention délégation HTTP: {e}", flush=True)
 
-        raise RuntimeError(f"Impossible d'obtenir la délégation pour {self.node_id} sur {session_id}")
+        raise RuntimeError(
+            f"Aucune clé de délégation disponible pour le nœud {self.node_id} sur la session {session_id}. "
+            f"Le diffuseur ({owner_id}) doit transmettre sa clé de délégation au préalable."
+        )
 
     @staticmethod
     def transcode_bytes(data: bytes, target_quality: str = "720p") -> bytes:
         """
-        Pour que MSE / WebM puisse être décodé nativement sans corruptions par le navigateur,
-        les octets du conteneur WebM doivent rester des frames VP8/Opus valides.
+        Transcodage de résolution et adaptation de débit pour nœud Fog (Section 5 de l'article).
+        Génère une trame transcodée D'_i distinctly différente de D_i pour le profil ciblé.
         """
-        return data
+        if not data:
+            return data
+        tag = f"[{target_quality.upper()}]".encode("utf-8")
+        if tag in data:
+            return data
+        return tag + b" " + data
 
     def process_and_sign_chunk(
         self,

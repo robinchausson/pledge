@@ -15,8 +15,22 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex } from '@noble/hashes/utils.js'
 
 const { G1, G2, pairing, fields } = bn254
-const { Fp2, Fp12, Fr } = fields
+const { Fp2, Fp12, Fr, Fp } = fields
 export const CURVE_ORDER = Fr.ORDER
+export const FIELD_MODULUS = Fp.ORDER
+const EXP_RESIDUE = (FIELD_MODULUS - 1n) / 2n
+const EXP_SQRT = (FIELD_MODULUS + 1n) / 4n
+
+function modPow(base, exponent, modulus) {
+  let result = 1n
+  base = base % modulus
+  while (exponent > 0n) {
+    if (exponent % 2n === 1n) result = (result * base) % modulus
+    exponent = exponent / 2n
+    base = (base * base) % modulus
+  }
+  return result
+}
 
 // Paramètres SIS définis dans l'article (Tableau 4)
 export const SIS_L = 64       // Nombre de lignes de A
@@ -134,9 +148,38 @@ export function serializeFp12(fp12) {
 
 export function hashH1ToG1(identity) {
   const cleanId = String(identity || '').trim()
-  const digest = sha256(new TextEncoder().encode(cleanId))
-  const scalar = (BigInt('0x' + bytesToHex(digest)) % (CURVE_ORDER - 1n)) + 1n
-  return G1.Point.BASE.multiply(scalar)
+  const baseMsg = new TextEncoder().encode(cleanId)
+  let counter = 0
+  while (true) {
+    const counterBytes = new Uint8Array(4)
+    new DataView(counterBytes.buffer).setUint32(0, counter, false) // Big endian
+    const combined = new Uint8Array(baseMsg.length + 4)
+    combined.set(baseMsg)
+    combined.set(counterBytes, baseMsg.length)
+    const digest = sha256(combined)
+    let x = 0n
+    for (let i = 0; i < 32; i++) {
+      x = (x << 8n) | BigInt(digest[i])
+    }
+    x = x % FIELD_MODULUS
+    const rhs = (x * x * x + 3n) % FIELD_MODULUS
+    // Test du résidu quadratique via le critère d'Euler
+    if (modPow(rhs, EXP_RESIDUE, FIELD_MODULUS) === 1n) {
+      let y = modPow(rhs, EXP_SQRT, FIELD_MODULUS)
+      // Normalisation déterministe : choix de la racine paire
+      if (y % 2n !== 0n) {
+        y = FIELD_MODULUS - y
+      }
+      try {
+        const pt = new G1.Point(x, y, 1n)
+        pt.assertValidity()
+        return pt
+      } catch (e) {
+        // Point non valide sur la courbe, incrémenter
+      }
+    }
+    counter++
+  }
 }
 
 export function hashH2(vRepr, paramARepr, fp12) {

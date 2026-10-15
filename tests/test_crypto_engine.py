@@ -243,3 +243,25 @@ def test_dynamic_operations_lifecycle():
     is_valid_del, _ = verify_signature(matrix_v_deleted, sig_deleted, owner_id, pk_zone)
     assert is_valid_del is True
 
+
+def test_hash_h1_to_g1_properties():
+    """Vérifie que H1 est déterministe, sur la courbe, et sans logarithme discret trivial."""
+    import hashlib
+    from py_ecc.optimized_bn128 import b, is_on_curve, normalize
+
+    identity = "alice@pledge.local"
+    pt1 = hash_h1_to_g1(identity)
+    pt2 = hash_h1_to_g1(identity)
+
+    # Déterminisme
+    assert pt1 == pt2
+
+    # Appartenance à la courbe
+    assert is_on_curve(pt1, b)
+
+    # Non-trivialité (ne doit pas être le scalaire direct multiplié par G1)
+    digest = hashlib.sha256(identity.encode("utf-8")).digest()
+    trivial_scalar = int.from_bytes(digest, "big") % (curve_order - 1) + 1
+    trivial_pt = multiply(G1, trivial_scalar)
+    assert normalize(pt1) != normalize(trivial_pt)
+

@@ -5,4 +5,9 @@ __pycache__
 .venv
 venv
 donnees_isolees/
+*.dat
+*.webm
+*.log
+.env
+.env.*
 .git

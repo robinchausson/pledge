@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, create_engine, event
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, create_engine, event, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 import os
 import datetime
@@ -77,6 +77,40 @@ class DataLocation(Base):
 
 # Création idempotente des tables dans la base
 Base.metadata.create_all(bind=engine)
+
+
+def _migrate_db():
+    """Ajoute de manière idempotente les colonnes manquantes dans SQLite."""
+    with engine.connect() as conn:
+        try:
+            # Table stream_sessions
+            res = conn.execute(text("PRAGMA table_info(stream_sessions)"))
+            existing_cols = {row[1] for row in res.fetchall()}
+            if "owner_pk" not in existing_cols:
+                conn.execute(text("ALTER TABLE stream_sessions ADD COLUMN owner_pk VARCHAR DEFAULT ''"))
+            if "is_delegated" not in existing_cols:
+                conn.execute(text("ALTER TABLE stream_sessions ADD COLUMN is_delegated INTEGER DEFAULT 0"))
+            if "delegate_id" not in existing_cols:
+                conn.execute(text("ALTER TABLE stream_sessions ADD COLUMN delegate_id VARCHAR DEFAULT ''"))
+            if "delegate_pk" not in existing_cols:
+                conn.execute(text("ALTER TABLE stream_sessions ADD COLUMN delegate_pk VARCHAR DEFAULT ''"))
+
+            # Table users
+            res_users = conn.execute(text("PRAGMA table_info(users)"))
+            existing_user_cols = {row[1] for row in res_users.fetchall()}
+            if "current_zone" not in existing_user_cols:
+                conn.execute(text("ALTER TABLE users ADD COLUMN current_zone VARCHAR DEFAULT 'Zone_1'"))
+            if "secret_share" not in existing_user_cols:
+                conn.execute(text("ALTER TABLE users ADD COLUMN secret_share VARCHAR DEFAULT ''"))
+            if "accumulated_pk" not in existing_user_cols:
+                conn.execute(text("ALTER TABLE users ADD COLUMN accumulated_pk VARCHAR DEFAULT ''"))
+
+            conn.commit()
+        except Exception as e:
+            print(f"[DB Migration] Avertissement migration: {e}", flush=True)
+
+
+_migrate_db()
 
 
 def get_db():

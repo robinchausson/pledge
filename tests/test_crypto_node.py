@@ -145,7 +145,7 @@ def test_dynamic_operations_api():
     # Initial V matrix: 64 x 3
     v_matrix = [[b0[r], b1[r], b2[r]] for r in range(64)]
 
-    # 1. Insertion
+    # 1. Insertion avec re-signature automatique
     new_block = base64.b64encode(b"inserted block").decode()
     res_ins = client.post(
         "/api/v1/crypto/dynamic/insert",
@@ -153,12 +153,15 @@ def test_dynamic_operations_api():
             "v_matrix": v_matrix,
             "block_index": 1,
             "block_data_b64": new_block,
+            "owner_identity": "alice@pledge.local",
         },
     )
     assert res_ins.status_code == 200
     ins_data = res_ins.json()
     assert ins_data["status"] == "success"
     assert ins_data["total_blocks"] == 4
+    assert ins_data["signature"] is not None
+    assert "w1" in ins_data["signature"]
     v_after_ins = ins_data["v_matrix"]
     assert len(v_after_ins) == 64
     assert len(v_after_ins[0]) == 4

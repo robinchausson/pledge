@@ -14,8 +14,10 @@ from sqlalchemy.orm import Session
 
 try:
     from .models import get_db, EdgeNode, DataLocation, StreamSession
+    from .security import create_stream_token
 except ImportError:
     from models import get_db, EdgeNode, DataLocation, StreamSession
+    from security import create_stream_token
 
 router = APIRouter()
 
@@ -66,6 +68,7 @@ class AllocateStreamResponse(BaseModel):
     edge_node_id: str
     zone_id: str
     upload_url: str
+    token: Optional[str] = None
     edge_host: str
     edge_port: int
     scheme: str
@@ -78,6 +81,7 @@ class DiscoverStreamResponse(BaseModel):
     edge_node_id: str
     zone_id: str
     download_url: str
+    token: Optional[str] = None
     transcoded_download_url: Optional[str] = None
     supports_transcoding: bool = True
     edge_host: str
@@ -199,7 +203,8 @@ def allocate_edge_node(req: AllocateStreamRequest, db: Session = Depends(get_db)
 
     db.commit()
 
-    upload_url = f"{EDGE_WS_SCHEME}://{target_node.ip_address}:{target_node.wss_port}/upload/{session_id}"
+    token = create_stream_token(session_id, role="streamer", node_id=target_node.node_id)
+    upload_url = f"{EDGE_WS_SCHEME}://{target_node.ip_address}:{target_node.wss_port}/upload/{session_id}?token={token}"
     print(f"[Signalisation] Session {session_id} allouée sur {target_node.node_id} ({upload_url})", flush=True)
 
     return AllocateStreamResponse(
@@ -207,6 +212,7 @@ def allocate_edge_node(req: AllocateStreamRequest, db: Session = Depends(get_db)
         edge_node_id=target_node.node_id,
         zone_id=target_node.zone_id,
         upload_url=upload_url,
+        token=token,
         edge_host=target_node.ip_address or "127.0.0.1",
         edge_port=target_node.wss_port or 8444,
         scheme=EDGE_WS_SCHEME,
@@ -240,8 +246,9 @@ def discover_stream_node(session_id: str, mode: str = "live", db: Session = Depe
     if not source_node:
         raise HTTPException(status_code=404, detail=f"Nœud hôte {target_node_id} introuvable")
 
-    download_url = f"{EDGE_WS_SCHEME}://{source_node.ip_address}:{source_node.wss_port}/download/{clean_session_id}?mode={mode}"
-    transcoded_download_url = f"{EDGE_WS_SCHEME}://{source_node.ip_address}:{source_node.wss_port}/download/{clean_session_id}?mode={mode}&quality=720p"
+    token = create_stream_token(clean_session_id, role="viewer", node_id=source_node.node_id)
+    download_url = f"{EDGE_WS_SCHEME}://{source_node.ip_address}:{source_node.wss_port}/download/{clean_session_id}?mode={mode}&token={token}"
+    transcoded_download_url = f"{EDGE_WS_SCHEME}://{source_node.ip_address}:{source_node.wss_port}/download/{clean_session_id}?mode={mode}&quality=720p&token={token}"
     print(f"[Signalisation] Visionneur orienté vers {source_node.node_id} (Direct={download_url}, Transcodé={transcoded_download_url})", flush=True)
 
     return DiscoverStreamResponse(
@@ -250,6 +257,7 @@ def discover_stream_node(session_id: str, mode: str = "live", db: Session = Depe
         edge_node_id=source_node.node_id,
         zone_id=source_node.zone_id,
         download_url=download_url,
+        token=token,
         transcoded_download_url=transcoded_download_url,
         supports_transcoding=True,
         edge_host=source_node.ip_address or "127.0.0.1",
@@ -423,7 +431,8 @@ async def publish_stream(websocket: WebSocket, client_id: str, db: Session = Dep
         await websocket.close(code=1011, reason="Aucun noeud Edge disponible")
         return
 
-    edge_ws_url = f"{EDGE_WS_SCHEME}://{target_node.ip_address}:{target_node.wss_port}/upload/{session_id}"
+    token = create_stream_token(session_id, role="streamer", node_id=target_node.node_id)
+    edge_ws_url = f"{EDGE_WS_SCHEME}://{target_node.ip_address}:{target_node.wss_port}/upload/{session_id}?token={token}"
     try:
         async with websockets.connect(edge_ws_url, max_size=None, ping_timeout=60, ping_interval=20) as edge_ws:
             compteur = 0
@@ -489,7 +498,8 @@ async def watch_stream(websocket: WebSocket, client_id: str, mode: str = "live",
     if not source_node:
         source_node = select_best_edge_node(db)
 
-    edge_ws_url = f"{EDGE_WS_SCHEME}://{source_node.ip_address}:{source_node.wss_port}/download/{session_id}?mode={mode}&quality={req_quality}"
+    token = create_stream_token(session_id, role="viewer", node_id=source_node.node_id)
+    edge_ws_url = f"{EDGE_WS_SCHEME}://{source_node.ip_address}:{source_node.wss_port}/download/{session_id}?mode={mode}&quality={req_quality}&token={token}"
     try:
         async with websockets.connect(edge_ws_url, max_size=None, ping_timeout=60, ping_interval=20) as edge_ws:
             while True:

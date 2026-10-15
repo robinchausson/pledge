@@ -142,6 +142,28 @@ class StreamerMobilityClient:
             "verifying_pk": engine.g2_to_json(verifying_pk),
         }
 
+    def issue_delegation(self, delegate_id: str, random_y: Optional[int] = None) -> dict:
+        """
+        Section 3.6.1 : Émission de la clé de délégation par le diffuseur (Data Owner Ow).
+          y in Z_p*, PK_d = y * G2
+          DK_d = Sw + y * H1(ID_d) in G1
+        """
+        if self.accumulated_secret_share is None:
+            raise RuntimeError("Le diffuseur ne possède aucune clé active pour émettre une délégation.")
+
+        dk_d, pk_d = engine.generate_delegation_key(
+            owner_secret_key=self.accumulated_secret_share,
+            delegate_identity=delegate_id,
+            random_y=random_y,
+        )
+        return {
+            "owner_id": self.identity,
+            "delegate_id": delegate_id,
+            "delegation_key": engine.g1_to_json(dk_d),
+            "delegate_pk": engine.g2_to_json(pk_d),
+            "zone_pk": engine.g2_to_json(self.accumulated_public_key) if self.accumulated_public_key else None,
+        }
+
     def get_public_credentials(self) -> dict:
         """Exporte l'état public vérifiable par n'importe quel consommateur / spectateur."""
         if self.accumulated_public_key is None:

@@ -9,8 +9,9 @@ import ssl
 import threading
 import time
 import websockets
+import jwt
 import paho.mqtt.client as mqtt
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote
 
 # --- CONFIGURATION RÉSEAU & IDENTITÉ ---
 NODE_ID = os.getenv("NODE_ID", "Edge_Node_01")
@@ -21,9 +22,18 @@ NODE_HOST = os.getenv("NODE_HOST") or os.getenv("LAN_IP_NODE") or os.getenv("NOD
 EDGE_WS_PORT = int(os.getenv("EDGE_WS_PORT") or os.getenv("PORT_WSS") or 8444)
 EDGE_WS_SCHEME = (os.getenv("EDGE_WS_SCHEME") or "ws").lower()
 
-# Broker MQTT
+# Sécurité des flux WebSocket Edge (Tokens JWT signés)
+EDGE_JWT_SECRET = os.getenv("EDGE_JWT_SECRET") or os.getenv("JWT_SECRET_KEY") or "VOTRE_CLE_SECRETE_TRES_LONGUE_ET_COMPLEXE"
+REQUIRE_WS_TOKEN = os.getenv("REQUIRE_WS_TOKEN", "true").lower() in ("true", "1")
+SESSION_INACTIVITY_TTL_SEC = int(os.getenv("SESSION_INACTIVITY_TTL_SEC", 60))
+
+# Broker MQTT (MQTTS TLS ou standard)
 BROKER_HOST = os.getenv("BROKER_HOST") or os.getenv("LAN_IP_BROKER") or os.getenv("BROKER_IP") or "127.0.0.1"
-BROKER_PORT = int(os.getenv("BROKER_PORT", 1883))
+BROKER_TLS = os.getenv("BROKER_TLS", "false").lower() in ("true", "1")
+BROKER_PORT = int(os.getenv("BROKER_PORT") or (8883 if BROKER_TLS else 1883))
+BROKER_CA_CERT = os.getenv("BROKER_CA_CERT", "")
+MQTT_USER = os.getenv("MQTT_USER")
+MQTT_PASSWORD = os.getenv("MQTT_PASSWORD")
 
 # Stockage et Télémétrie
 DOSSIER_RACINE_STOCKAGE = os.getenv("EDGE_DATA_DIR", "/donnees_isolees")
@@ -120,6 +130,14 @@ def thread_telemetrie_mqtt():
 
     client.on_connect = on_connect
     client.on_message = on_message
+
+    if BROKER_TLS:
+        ca = BROKER_CA_CERT if (BROKER_CA_CERT and os.path.exists(BROKER_CA_CERT)) else None
+        client.tls_set(ca_certs=ca, cert_reqs=ssl.CERT_REQUIRED if ca else ssl.CERT_NONE)
+        print(f"[{NODE_ID}] MQTTS activé (TLS sur port {BROKER_PORT})", flush=True)
+
+    if MQTT_USER and MQTT_PASSWORD:
+        client.username_pw_set(MQTT_USER, MQTT_PASSWORD)
 
     while True:
         try:
@@ -262,23 +280,8 @@ async def reception_flux_video(websocket, client_id):
         with session_stats_lock:
             if clean_id in session_stats:
                 session_stats[clean_id]["active"] = False
-
-        # Planifier la purge automatique après la fin du live
-        def delayed_purge():
-            time.sleep(4)
-            # Attendre que les éventuels spectateurs aient terminé la lecture
-            for _ in range(15):
-                with active_viewers_lock:
-                    if active_viewers.get(clean_id, 0) == 0:
-                        break
-                time.sleep(1)
-
-            print(f"[{NODE_ID}] Purge automatique post-live du stockage pour : {clean_id}", flush=True)
-            purge_session_directory(dossier_client)
-            with session_stats_lock:
-                session_stats.pop(clean_id, None)
-
-        threading.Thread(target=delayed_purge, daemon=True).start()
+                session_stats[clean_id]["disconnected_at"] = time.time()
+        print(f"[{NODE_ID}] Upload interrompu pour {clean_id} : blocs conservés sur disque (surveillance inactivité {SESSION_INACTIVITY_TTL_SEC}s)", flush=True)
 
 
 async def envoi_flux_video(websocket, client_id, mode="live", fmt="auto", quality="original"):
@@ -429,9 +432,59 @@ async def envoi_flux_video(websocket, client_id, mode="live", fmt="auto", qualit
             active_viewers[clean_id] = max(0, active_viewers.get(clean_id, 1) - 1)
 
 
+def verifier_token_acces(token: str | None, session_id: str, role_attendu: str) -> bool:
+    """Valide le jeton d'accès WebSocket signé (Phase 2 Sécurité)."""
+    if not REQUIRE_WS_TOKEN:
+        return True
+    if not token:
+        return False
+    try:
+        payload = jwt.decode(token, EDGE_JWT_SECRET, algorithms=["HS256"])
+        if payload.get("type") != "stream_access":
+            return False
+        sub = str(payload.get("sub", ""))
+        accepted_subs = {session_id, unquote(session_id), sanitize_id(session_id)}
+        if sub not in accepted_subs and sanitize_id(sub) != sanitize_id(session_id):
+            return False
+        if payload.get("role") != role_attendu:
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def surveillance_inactivite_sessions():
+    """Surveille l'inactivité des sessions et purge le stockage après SESSION_INACTIVITY_TTL_SEC (60s)."""
+    while True:
+        try:
+            time.sleep(5)
+            maintenant = time.time()
+            sessions_a_purger = []
+            with session_stats_lock:
+                for s_id, stats in list(session_stats.items()):
+                    if not stats.get("active", False):
+                        disc_at = stats.get("disconnected_at", 0)
+                        with active_viewers_lock:
+                            viewers = active_viewers.get(s_id, 0)
+                        if viewers == 0 and disc_at > 0 and (maintenant - disc_at) >= SESSION_INACTIVITY_TTL_SEC:
+                            sessions_a_purger.append(s_id)
+
+            for s_id in sessions_a_purger:
+                dossier = os.path.join(DOSSIER_RACINE_STOCKAGE, s_id)
+                print(f"[{NODE_ID}] Inactivité dépassée ({SESSION_INACTIVITY_TTL_SEC}s) pour {s_id}. Purge du stockage.", flush=True)
+                purge_session_directory(dossier)
+                with session_stats_lock:
+                    session_stats.pop(s_id, None)
+        except Exception as err:
+            print(f"[{NODE_ID}] Erreur surveillance inactivité: {err}", flush=True)
+
+
 async def routeur_ws(websocket, path=None):
-    # Support de la compatibilité websockets version 11 et 14+
-    request_path = getattr(websocket, "path", path) or ""
+    # Support de la compatibilité websockets versions antérieures et v14+ (websocket.request.path)
+    request_path = getattr(websocket, "path", None)
+    if not request_path and hasattr(websocket, "request"):
+        request_path = getattr(websocket.request, "path", None)
+    request_path = request_path or path or ""
     parsed = urlparse(request_path)
     clean_path = parsed.path.strip("/")
     parts = clean_path.split("/") if clean_path else []
@@ -439,16 +492,24 @@ async def routeur_ws(websocket, path=None):
     mode = query_params.get("mode", ["live"])[0].lower()
     fmt = query_params.get("format", ["auto"])[0].lower()
     quality = query_params.get("quality", ["original"])[0].lower()
+    token = query_params.get("token", [None])[0]
 
     if len(parts) >= 2:
         action = parts[0].lower()
-        client_id = parts[1]
+        client_id = unquote(parts[1])
     elif len(parts) == 1 and parts[0]:
         action = "upload"
-        client_id = parts[0]
+        client_id = unquote(parts[0])
     else:
         action = "upload"
         client_id = "default_stream"
+
+    # Contrôle d'accès par token signé (Sécurité Edge P2)
+    role_attendu = "streamer" if action == "upload" else "viewer"
+    if not verifier_token_acces(token, client_id, role_attendu):
+        print(f"[{NODE_ID}] Rejet connexion {action}/{client_id} : token d'accès invalide ou manquant", flush=True)
+        await websocket.close(code=1008, reason="Authentification invalide ou token expiré")
+        return
 
     if action == "upload":
         await reception_flux_video(websocket, client_id)
@@ -486,5 +547,7 @@ if __name__ == "__main__":
     print(f"--- Démarrage du Nœud Edge {NODE_ID} (Zone: {ZONE_ID}) ---", flush=True)
     # Lancement du plan de contrôle MQTT en arrière-plan
     threading.Thread(target=thread_telemetrie_mqtt, daemon=True).start()
+    # Lancement de la surveillance d'inactivité des sessions (TTL 60s)
+    threading.Thread(target=surveillance_inactivite_sessions, daemon=True).start()
     # Lancement de la boucle principale de données WebSocket
     asyncio.run(boucle_principale_ws())

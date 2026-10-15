@@ -13,13 +13,13 @@ try:
     from .models import get_db, User, SessionLocal, EdgeNode, DataLocation, StreamSession
     from . import schemas, security
     from .stream_router import router as stream_router, crypto_client, CRYPTO_SERVERS
-    from .mqtt_client import start_mqtt, is_mqtt_connected
+    from .mqtt_client import start_mqtt, is_mqtt_connected, get_mqtt_health
 except ImportError:
     from models import get_db, User, SessionLocal, EdgeNode, DataLocation, StreamSession
     import schemas
     import security
     from stream_router import router as stream_router, crypto_client, CRYPTO_SERVERS
-    from mqtt_client import start_mqtt, is_mqtt_connected
+    from mqtt_client import start_mqtt, is_mqtt_connected, get_mqtt_health
 
 mqtt_client_instance = None
 
@@ -36,17 +36,15 @@ async def lifespan(app: FastAPI):
     global mqtt_client_instance
     mqtt_client_instance = start_mqtt()
 
-    # Création ou mise à jour du compte administrateur
+    # Création du compte administrateur par défaut s'il n'existe pas encore (persistance)
     db = SessionLocal()
     try:
         admin = db.query(User).filter(User.email == "admin@admin.com").first()
-        hashed_pwd = security.get_password_hash("Azerty123")
         if not admin:
+            hashed_pwd = security.get_password_hash("Azerty123")
             admin = User(email="admin@admin.com", hashed_password=hashed_pwd, role="admin")
             db.add(admin)
-        else:
-            admin.hashed_password = hashed_pwd
-        db.commit()
+            db.commit()
     except Exception as e:
         print(f"Erreur init admin: {e}", flush=True)
     finally:
@@ -100,6 +98,7 @@ async def health_check(db: Session = Depends(get_db)):
         "timestamp": datetime.datetime.utcnow().isoformat(),
         "database": "ok",
         "mqtt": "connected" if is_mqtt_connected() else "disconnected",
+        "mqtt_zones": get_mqtt_health(),
         "crypto_nodes": {},
     }
 

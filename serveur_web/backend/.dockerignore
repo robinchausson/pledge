@@ -4,3 +4,16 @@ __pycache__
 *.pyd
 .venv
 venv
+data/
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+.env
+.env.*
+*.log
+tests/
+.pytest_cache/
+.git

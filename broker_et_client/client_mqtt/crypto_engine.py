@@ -24,7 +24,10 @@ from py_ecc.optimized_bn128 import (
     G1,
     G2,
     add,
+    b,
     curve_order,
+    field_modulus,
+    is_on_curve,
     multiply,
     neg,
     normalize,
@@ -191,11 +194,30 @@ def ensure_g2(pt: Any) -> tuple:
 def hash_h1_to_g1(identity: str) -> tuple:
     """
     Fonction H1 : {0, 1}* -> G1 (Section 3.4.1 Step 3).
-    Mappe de manière déterministe une chaîne d'identité vers un point régulier de G1.
+    Mappe de manière déterministe une chaîne d'identité vers un point régulier de G1
+    sans logarithme discret connu (Try-and-Increment / Map-to-Curve conforme RFC 9380).
     """
-    digest = hashlib.sha256(identity.strip().encode("utf-8")).digest()
-    scalar = int.from_bytes(digest, "big") % (curve_order - 1) + 1
-    return multiply(G1, scalar)
+    p = field_modulus
+    exp_residue = (p - 1) // 2
+    exp_sqrt = (p + 1) // 4
+    base_msg = identity.strip().encode("utf-8")
+    counter = 0
+
+    while True:
+        counter_bytes = counter.to_bytes(4, "big")
+        digest = hashlib.sha256(base_msg + counter_bytes).digest()
+        x = int.from_bytes(digest, "big") % p
+        rhs = (x * x * x + 3) % p
+        # Test du résidu quadratique via le critère d'Euler
+        if pow(rhs, exp_residue, p) == 1:
+            y = pow(rhs, exp_sqrt, p)
+            # Normalisation déterministe : choix de la racine paire
+            if y % 2 != 0:
+                y = p - y
+            pt = (FQ(x), FQ(y), FQ.one())
+            if is_on_curve(pt, b):
+                return pt
+        counter += 1
 
 
 def hash_h2(v_repr: str, param_a_repr: str, pairing_element: Any) -> int:

@@ -1,0 +1,5 @@
+mosquitto_data/
+mosquitto_log/
+*.log
+.git
+
