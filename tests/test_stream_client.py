@@ -35,3 +35,4 @@ async def test_envoyer_faux_flux_simulated():
     finally:
         server.close()
         await server.wait_closed()
+

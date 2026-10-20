@@ -145,3 +145,4 @@ assert.strictEqual(auditTampered.isSisValid, false)
 console.log('  -> Succès : Altération d\'un seul bit détectée par le viewer local !')
 
 console.log('=== TOUS LES TESTS DU MODULE FRONTEND PASSENT AVEC SUCCÈS (7/7) ===')
+
