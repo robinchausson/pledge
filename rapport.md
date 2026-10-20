@@ -76,7 +76,7 @@ Le diffuseur (*Data Owner* $O_w$) calcule la preuve matricielle SIS et signe dir
 
 ## 4. Validation des Tests Unitaires
 
-La suite de tests unitaires dédiée (`serveur_web/frontend/test_cryptoClient.js`) valide l'intégralité du pipeline :
+La suite de tests unitaires dédiée (`tests/test_cryptoClient.js`) valide l'intégralité du pipeline :
 ```
 === DÉBUT DES TESTS UNITAIRES FRONTEND CRYPTO (PHASE 5) ===
 [Test 1] Génération déterministe de la matrice A (L'Ecuyer 1994)... -> Succès

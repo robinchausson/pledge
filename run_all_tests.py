@@ -93,8 +93,8 @@ def main():
                 )
             else:
                 success_js, dur_js = run_command_stream(
-                    [node_path, "test_cryptoClient.js"],
-                    cwd=FRONTEND_DIR,
+                    [node_path, str(ROOT_DIR / "tests" / "test_cryptoClient.js")],
+                    cwd=ROOT_DIR,
                     description="Suite Frontend Crypto Client (Node.js direct)",
                 )
             results.append(("Suite Crypto Frontend (JavaScript)", success_js, dur_js))

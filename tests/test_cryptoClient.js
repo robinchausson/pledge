@@ -15,10 +15,9 @@ import {
   g1ToJson,
   g2ToJson,
   CURVE_ORDER,
-} from './src/cryptoClient.js'
-import { bn254 } from '@noble/curves/bn254.js'
-
-const { G1, G2 } = bn254
+  G1,
+  G2,
+} from '../serveur_web/frontend/src/cryptoClient.js'
 
 console.log('=== DÉBUT DES TESTS UNITAIRES FRONTEND CRYPTO (PHASE 5) ===')
 
@@ -146,4 +145,3 @@ assert.strictEqual(auditTampered.isSisValid, false)
 console.log('  -> Succès : Altération d\'un seul bit détectée par le viewer local !')
 
 console.log('=== TOUS LES TESTS DU MODULE FRONTEND PASSENT AVEC SUCCÈS (7/7) ===')
-

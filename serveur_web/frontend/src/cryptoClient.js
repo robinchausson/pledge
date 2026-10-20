@@ -14,7 +14,8 @@ import { bn254 } from '@noble/curves/bn254.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex } from '@noble/hashes/utils.js'
 
-const { G1, G2, pairing, fields } = bn254
+export const { G1, G2, pairing, fields } = bn254
+export { bn254 }
 const { Fp2, Fp12, Fr, Fp } = fields
 export const CURVE_ORDER = Fr.ORDER
 export const FIELD_MODULUS = Fp.ORDER
