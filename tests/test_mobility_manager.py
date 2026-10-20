@@ -227,3 +227,150 @@ def test_join_zone_via_api_mock():
     pub_creds = client.get_public_credentials()
     assert pub_creds["identity"] == identity
     assert "Zone_Paris_01" in pub_creds["zones"]
+
+
+def test_streamer_switch_zone1_to_zone2_with_re_signing_and_viewer_verification():
+    """
+    Mission 3 : Test de Mobilité Multi-Zone avec Re-signature
+    - Valide la bascule d'un diffuseur de Zone_1 vers Zone_2.
+    - Vérifie l'accumulation homomorphe des parts secrètes et clés publiques.
+    - Teste la re-signature / signature en Zone 2 et sa vérification par le spectateur.
+    - Vérifie le rejet strict des clés partielles et la détection d'altération.
+    """
+    streamer_id = "streamer_mobility_nomad@pledge.local"
+    client = StreamerMobilityClient(identity=streamer_id)
+
+    # =========================================================================
+    # ÉTAPE 1 : DIFFUSION INITIALE EN ZONE 1
+    # =========================================================================
+    msk_z1, pk_z1 = engine.generate_zone_master_key(100000001)
+    share_z1 = engine.compute_secret_share(msk_z1, streamer_id)
+    client.add_zone_credentials("Zone_1", share_z1, pk_z1)
+
+    block_0_payload = b"PLEDGE_VIDEO_KEYFRAME_ZONE_1_ORIGIN"
+    pkg_z1 = client.sign_block(block_0_payload)
+
+    assert pkg_z1["signer_id"] == streamer_id
+    assert pkg_z1["zones_scope"] == ["Zone_1"]
+
+    # Le spectateur vérifie le bloc émis en Zone 1
+    valid_z1, msg_z1 = StreamerMobilityClient.verify_block_package(pkg_z1, data=block_0_payload)
+    assert valid_z1 is True
+    assert "succès" in msg_z1.lower()
+
+    # =========================================================================
+    # ÉTAPE 2 : BASCULE DE MOBILITÉ VERS ZONE 2 & ACCUMULATION DES CLÉS
+    # =========================================================================
+    msk_z2, pk_z2 = engine.generate_zone_master_key(200000002)
+    share_z2 = engine.compute_secret_share(msk_z2, streamer_id)
+
+    # Enregistrement de la nouvelle zone : accumulation homomorphe
+    client.add_zone_credentials("Zone_2", share_z2, pk_z2)
+
+    assert len(client.visited_zones) == 2
+    assert "Zone_1" in client.visited_zones
+    assert "Zone_2" in client.visited_zones
+
+    expected_accumulated_sk = engine.add(share_z1, share_z2)
+    expected_accumulated_pk = engine.add(pk_z1, pk_z2)
+
+    assert client.current_secret_key == expected_accumulated_sk
+    assert client.current_public_key == expected_accumulated_pk
+
+    # =========================================================================
+    # ÉTAPE 3 : RE-SIGNATURE ET ÉMISSION DU NOUVEAU FLUX EN ZONE 2
+    # =========================================================================
+    # 3.1 Nouveau bloc émis depuis la Zone 2
+    block_1_payload = b"PLEDGE_VIDEO_DELTA_FRAME_ZONE_2_AFTER_MOBILITY"
+    pkg_z2 = client.sign_block(block_1_payload)
+
+    assert pkg_z2["signer_id"] == streamer_id
+    assert pkg_z2["zones_scope"] == ["Zone_1", "Zone_2"]
+
+    # 3.2 Re-signature d'un bloc antérieur (bloc 0) avec les identifiants accumulés
+    pkg_0_resigned = client.sign_block(block_0_payload)
+    assert pkg_0_resigned["zones_scope"] == ["Zone_1", "Zone_2"]
+
+    # =========================================================================
+    # ÉTAPE 4 : VÉRIFICATION PAR LE SPECTATEUR (AUDIT PUBLIC SANS TPA)
+    # =========================================================================
+    # 4.1 Le spectateur vérifie le nouveau bloc émis en Zone 2
+    valid_viewer_z2, detail_z2 = StreamerMobilityClient.verify_block_package(
+        pkg_z2, data=block_1_payload
+    )
+    assert valid_viewer_z2 is True
+    assert "succès" in detail_z2.lower()
+
+    # 4.2 Le spectateur vérifie le bloc 0 re-signé
+    valid_resigned, _ = StreamerMobilityClient.verify_block_package(
+        pkg_0_resigned, data=block_0_payload
+    )
+    assert valid_resigned is True
+
+    # 4.3 Tentatives de vérification avec clés partielles (doivent échouer)
+    valid_only_pk1, _ = StreamerMobilityClient.verify_block_package(
+        pkg_z2, data=block_1_payload, override_pk=pk_z1
+    )
+    assert valid_only_pk1 is False
+
+    valid_only_pk2, _ = StreamerMobilityClient.verify_block_package(
+        pkg_z2, data=block_1_payload, override_pk=pk_z2
+    )
+    assert valid_only_pk2 is False
+
+    # =========================================================================
+    # ÉTAPE 5 : RÉSISTANCE AUX CORRUPTIONS ET ATTAQUES EN MOBILITÉ
+    # =========================================================================
+    # Altération d'un seul octet dans la charge utile vidéo
+    tampered_payload = b"PLEDGE_VIDEO_DELTA_FRAME_ZONE_2_AFTER_MOBILITX"
+    valid_tampered, tampered_reason = StreamerMobilityClient.verify_block_package(
+        pkg_z2, data=tampered_payload
+    )
+    assert valid_tampered is False
+    assert "SIS" in tampered_reason
+
+    # Usurpation de l'identité du diffuseur
+    impostor_pkg = dict(pkg_z2)
+    impostor_pkg["signer_id"] = "eve_malicious@pledge.local"
+    valid_impostor, _ = StreamerMobilityClient.verify_block_package(
+        impostor_pkg, data=block_1_payload
+    )
+    assert valid_impostor is False
+
+
+def test_mobility_delegated_transcoding_in_target_zone():
+    """
+    Vérifie qu'après bascule en Zone 2, le diffuseur peut déléguer le transcodage
+    à un nœud Fog de Zone 2 avec sa clé accumulée, et le spectateur vérifie avec 3 accouplements.
+    """
+    streamer_id = "streamer_delegation_nomad@pledge.local"
+    client = StreamerMobilityClient(identity=streamer_id)
+
+    # Accumulation Zone 1 + Zone 2
+    msk1, pk1 = engine.generate_zone_master_key(3001)
+    msk2, pk2 = engine.generate_zone_master_key(3002)
+    client.add_zone_credentials("Zone_1", engine.compute_secret_share(msk1, streamer_id), pk1)
+    client.add_zone_credentials("Zone_2", engine.compute_secret_share(msk2, streamer_id), pk2)
+
+    edge_node_z2 = "Edge_Fog_Jetson_Zone_2"
+    delegation = client.issue_delegation(delegate_id=edge_node_z2, random_y=445566)
+
+    assert delegation["owner_id"] == streamer_id
+    assert delegation["delegate_id"] == edge_node_z2
+
+    # Le nœud Edge de Zone 2 transcode en 720p et re-signe avec sa clé déléguée DK_d
+    frame_720p = b"VP8_VIDEO_720P_TRANSCODED_BY_ZONE_2_JETSON"
+    v_transcoded = engine.compute_sis_vector(frame_720p)
+    sig_transcoded = engine.sign_delegated_data(v_transcoded, delegation["delegation_key"])
+
+    # Le spectateur vérifie le flux transcodé délégué
+    is_valid, reason = engine.verify_delegated_signature(
+        v_data=v_transcoded,
+        sig_dict=sig_transcoded,
+        owner_identity=streamer_id,
+        zone_pk=client.current_public_key,
+        delegate_identity=edge_node_z2,
+        delegate_pk=delegation["delegate_pk"],
+    )
+    assert is_valid is True
+    assert "succès" in reason.lower()

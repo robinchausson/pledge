@@ -8,6 +8,9 @@ import {
   uint8ArrayToBase64,
   base64ToUint8Array,
   DEFAULT_PARAM_A,
+  ClientMobilityManager,
+  getZoneMasterScalar,
+  ZONE_MASTER_SCALARS,
 } from './cryptoClient.js'
 import {
   PlayIcon,
@@ -57,17 +60,88 @@ function Logo({ onClick }) {
   return (
     <a className="brand-link" href="#top" onClick={onClick} aria-label="Pledge accueil">
       <img src="/logo.png" alt="Pledge" className="brand-logo-img" />
-      <div className="brand-tag">
-        <span className="brand-name">PLEDGE</span>
-        <span className="brand-slogan">STREAM BEYOND</span>
-      </div>
     </a>
+  )
+}
+
+function ZoneHeaderSelector({ currentZone, onZoneChange }) {
+  const [open, setOpen] = useState(false)
+  const dropdownRef = useRef(null)
+
+  useEffect(() => {
+    function handleClickOutside(event) {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
+        setOpen(false)
+      }
+    }
+    if (open) {
+      document.addEventListener('mousedown', handleClickOutside)
+      return () => document.removeEventListener('mousedown', handleClickOutside)
+    }
+  }, [open])
+
+  const zoneLabel = currentZone === 'Zone_2' ? 'Zone 2' : 'Zone 1'
+
+  return (
+    <div className="zone-header-dropdown" ref={dropdownRef}>
+      <button
+        type="button"
+        className={`zone-badge-interactive ${open ? 'open' : ''}`}
+        onClick={() => setOpen((prev) => !prev)}
+        title="Changer de zone à chaud"
+        aria-haspopup="true"
+        aria-expanded={open}
+      >
+        <span className="zone-pin-icon">📍</span>
+        <span className="zone-name-text">{zoneLabel} (Actuelle)</span>
+        <ChevronDownIcon size={14} className={`zone-chevron ${open ? 'rotate' : ''}`} />
+      </button>
+
+      {open && (
+        <div className="zone-dropdown-menu">
+          <div className="zone-dropdown-header">
+            <span>Réseau & Topologie</span>
+            <small>Changement à chaud</small>
+          </div>
+          <button
+            type="button"
+            className={`zone-dropdown-item ${currentZone === 'Zone_1' ? 'active' : ''}`}
+            onClick={() => {
+              onZoneChange('Zone_1')
+              setOpen(false)
+            }}
+          >
+            <span className="zone-item-bullet">📍</span>
+            <div className="zone-item-texts">
+              <span className="zone-item-title">Zone 1 (Zone Principale)</span>
+              <span className="zone-item-desc">Nœud Fog et Courtier Local</span>
+            </div>
+            {currentZone === 'Zone_1' && <span className="zone-active-pill">Active</span>}
+          </button>
+          <button
+            type="button"
+            className={`zone-dropdown-item ${currentZone === 'Zone_2' ? 'active' : ''}`}
+            onClick={() => {
+              onZoneChange('Zone_2')
+              setOpen(false)
+            }}
+          >
+            <span className="zone-item-bullet">🌐</span>
+            <div className="zone-item-texts">
+              <span className="zone-item-title">Zone 2 (Zone Secondaire)</span>
+              <span className="zone-item-desc">Nœud Fog et Courtier Distant</span>
+            </div>
+            {currentZone === 'Zone_2' && <span className="zone-active-pill">Active</span>}
+          </button>
+        </div>
+      )}
+    </div>
   )
 }
 
 function AuthDialog({ mode, setMode, onSuccess, onClose }) {
   const isRegister = mode === 'register'
-  const [form, setForm] = useState({ email: '', password: '', role: 'viewer' })
+  const [form, setForm] = useState({ email: '', password: '', role: 'viewer', current_zone: 'Zone_1' })
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
@@ -75,12 +149,24 @@ function AuthDialog({ mode, setMode, onSuccess, onClose }) {
     setForm((current) => ({ ...current, [event.target.name]: event.target.value }))
   }
 
+  function handleZoneSelect(zone) {
+    setForm((current) => ({ ...current, current_zone: zone }))
+  }
+
   async function handleSubmit(event) {
     event.preventDefault()
     setError('')
     setLoading(true)
     try {
-      const payload = isRegister ? form : { email: form.email, password: form.password }
+      const payload = isRegister
+        ? {
+            email: form.email,
+            password: form.password,
+            role: form.role,
+            current_zone: form.current_zone,
+            zone: form.current_zone,
+          }
+        : { email: form.email, password: form.password }
       let data = await apiRequest(isRegister ? '/auth/register' : '/auth/login', {
         method: 'POST',
         body: JSON.stringify(payload),
@@ -91,7 +177,13 @@ function AuthDialog({ mode, setMode, onSuccess, onClose }) {
           body: JSON.stringify({ email: form.email, password: form.password }),
         })
       }
-      onSuccess(data.user || form)
+      const loggedUser = {
+        ...(data.user || {}),
+        email: data.user?.email || form.email,
+        role: data.user?.role || form.role,
+        current_zone: data.user?.current_zone || form.current_zone || 'Zone_1',
+      }
+      onSuccess(loggedUser)
     } catch (requestError) {
       setError(requestError.message)
     } finally {
@@ -118,13 +210,55 @@ function AuthDialog({ mode, setMode, onSuccess, onClose }) {
             <input name="password" type="password" value={form.password} onChange={updateField} placeholder="••••••••" minLength="6" autoComplete={isRegister ? 'new-password' : 'current-password'} required />
           </label>
           {isRegister && (
-            <label>
-              Rôle
-              <select name="role" value={form.role} onChange={updateField}>
-                <option value="viewer">Visionneur (Spectateur)</option>
-                <option value="streamer">Diffuseur (Streamer)</option>
-              </select>
-            </label>
+            <>
+              <label>
+                Rôle
+                <select name="role" value={form.role} onChange={updateField}>
+                  <option value="viewer">Visionneur (Spectateur)</option>
+                  <option value="streamer">Diffuseur (Streamer)</option>
+                </select>
+              </label>
+              <div className="form-field">
+                <label style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span>Zone d'attachement</span>
+                  <span style={{ fontSize: '10.5px', color: 'var(--cyan)' }}>Topologie Décentralisée</span>
+                </label>
+                <div className="zone-choice-group" role="radiogroup" aria-label="Choix de zone">
+                  <button
+                    type="button"
+                    className={`zone-choice-card ${form.current_zone === 'Zone_1' ? 'active' : ''}`}
+                    onClick={() => handleZoneSelect('Zone_1')}
+                  >
+                    <div className="zone-choice-header">
+                      <span className="zone-choice-badge">📍 Zone 1</span>
+                      <span className="zone-choice-sub">Principale</span>
+                    </div>
+                    <span className="zone-choice-desc">Zone Principale (Nœud Fog & Courtier Local)</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`zone-choice-card ${form.current_zone === 'Zone_2' ? 'active' : ''}`}
+                    onClick={() => handleZoneSelect('Zone_2')}
+                  >
+                    <div className="zone-choice-header">
+                      <span className="zone-choice-badge">🌐 Zone 2</span>
+                      <span className="zone-choice-sub">Secondaire</span>
+                    </div>
+                    <span className="zone-choice-desc">Zone Secondaire (Nœud Fog & Courtier Distant)</span>
+                  </button>
+                </div>
+                {/* Sélecteur natif masqué pour compatibilité standard */}
+                <select
+                  name="current_zone"
+                  value={form.current_zone}
+                  onChange={updateField}
+                  style={{ display: 'none' }}
+                >
+                  <option value="Zone_1">Zone 1 (Zone Principale)</option>
+                  <option value="Zone_2">Zone 2 (Zone Secondaire)</option>
+                </select>
+              </div>
+            </>
           )}
           <div className="form-error" role="alert">{error}</div>
           <button className="button button-primary button-wide" type="submit" disabled={loading} style={{ marginTop: '10px' }}>
@@ -223,6 +357,8 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
   const [quality, setQuality] = useState('1080p')
   const [chunksReceived, setChunksReceived] = useState(0)
   const [connectedNode, setConnectedNode] = useState(null)
+  const [edgeDeliveryZone, setEdgeDeliveryZone] = useState('Zone_1')
+  const [streamEmissionZone, setStreamEmissionZone] = useState('Zone_1')
   const [isPlaying, setIsPlaying] = useState(true)
   const [isMuted, setIsMuted] = useState(true)
   const [volume, setVolume] = useState(1)
@@ -333,6 +469,10 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
       // 1. Découverte du nœud Edge Fog via le backend
       const discovery = await apiRequest(`/api/stream/discover/${encodeURIComponent(targetId)}?mode=start&quality=${q}`)
       setConnectedNode(discovery.edge_node_id)
+      setEdgeDeliveryZone(discovery.zone_id || 'Zone_1')
+      if (discovery.stream_zone) {
+        setStreamEmissionZone(discovery.stream_zone)
+      }
 
       const defaultZonePk = deriveStreamerKey(targetId).zonePk
 
@@ -500,6 +640,9 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
         // VÉRIFICATION D'INTÉGRITÉ CÔTÉ SPECTATEUR (Phase 5)
         if (packet) {
           setLastPacketData(packet)
+          if (packet.emission_zone) {
+            setStreamEmissionZone(packet.emission_zone)
+          }
           const audit = verifyIncomingBlock(chunk, packet, defaultZonePk)
 
           if (!audit.isValid) {
@@ -578,6 +721,8 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
     }
     setWatching(false)
     setConnectedNode(null)
+    setEdgeDeliveryZone('Zone_1')
+    setStreamEmissionZone('Zone_1')
     setAuditStatus('idle')
   }
 
@@ -613,9 +758,12 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
                   >
                     <span className="pulse-dot" /> EN DIRECT
                   </span>
+                  <span className="player-overlay-pill emission" title="Zone géographique d'émission du flux">
+                    <RadioIcon size={12} /> Émission : {streamEmissionZone === 'Zone_2' ? 'Zone 2' : 'Zone 1'}
+                  </span>
                   {connectedNode && (
-                    <span className="player-overlay-pill fog">
-                      <ServerIcon size={12} /> {connectedNode}
+                    <span className="player-overlay-pill fog" title="Nœud Edge local de livraison">
+                      <ServerIcon size={12} /> Nœud Edge : {connectedNode} ({edgeDeliveryZone === 'Zone_2' ? 'Zone 2' : 'Zone 1'})
                     </span>
                   )}
                 </div>
@@ -720,7 +868,7 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
           )}
         </div>
 
-        {/* EN-TÊTE ÉPURÉ DE LA CHAÎNE */}
+        {/* EN-TÊTE ÉPURÉ DE LA CHAÎNE AVEC ZONES (AGENT 3) */}
         <div className="clean-channel-header">
           <div className="channel-info-left">
             <div className="channel-avatar-large">{streamerName.charAt(0).toUpperCase()}</div>
@@ -735,9 +883,16 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
                     <ShieldCheckIcon size={14} />
                   </span>
                 </span>
+                <span className="channel-tag-pill emission">
+                  📍 Émission : {streamEmissionZone === 'Zone_2' ? 'Zone 2' : 'Zone 1'}
+                </span>
+                {connectedNode && (
+                  <span className="channel-tag-pill fog">
+                    🌐 Nœud Edge local : {connectedNode} ({edgeDeliveryZone === 'Zone_2' ? 'Zone 2' : 'Zone 1'})
+                  </span>
+                )}
                 <span className="channel-tag-pill accent">Hess-IBS & SIS</span>
                 <span className="channel-tag-pill">Sans TPA</span>
-                {connectedNode && <span className="channel-tag-pill">{connectedNode}</span>}
               </div>
             </div>
           </div>
@@ -810,11 +965,16 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
 
               {lastPacketData && (
                 <div className="crypto-inspector-box" style={{ marginTop: '12px' }}>
-                  <div className="inspector-header-label">Paramètres Cryptographiques</div>
+                  <div className="inspector-header-label">Paramètres Cryptographiques & Topologie Multi-Zone</div>
+                  <div><strong>Zone d'émission du flux :</strong> {streamEmissionZone === 'Zone_2' ? 'Zone 2 (Zone Secondaire)' : 'Zone 1 (Zone Principale)'}</div>
+                  <div><strong>Nœud Edge local de distribution :</strong> {connectedNode || 'Non spécifié'} ({edgeDeliveryZone === 'Zone_2' ? 'Zone 2' : 'Zone 1'})</div>
                   <div><strong>Signataire :</strong> {lastPacketData.signer_id}</div>
                   <div><strong>SIS :</strong> q=4099, l=64, m=1536 (I0={lastPacketData.paramA?.I0}, a={lastPacketData.paramA?.a}, C0={lastPacketData.paramA?.C0})</div>
                   <div><strong>Signature Hess-IBS w1 :</strong> {lastPacketData.signature?.w1}</div>
                   <div><strong>Délégation :</strong> {lastPacketData.is_delegated ? `Délégué à ${lastPacketData.delegate_id}` : 'Direct'}</div>
+                  {lastPacketData.visited_zones && lastPacketData.visited_zones.length > 1 && (
+                    <div><strong>Mobilité homomorphe :</strong> Clés cumulées sur [{lastPacketData.visited_zones.join(', ')}]</div>
+                  )}
                 </div>
               )}
             </div>
@@ -826,26 +986,81 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
 }
 
 // =====================================================================
-// STUDIO DIFFUSEUR SIMPLE ET EFFICACE
+// STUDIO DIFFUSEUR AVEC SUPPORT DE MOBILITÉ HOMOMORPHE (AGENT 3)
 // =====================================================================
-function StreamerInterface({ user }) {
+function StreamerInterface({ user, onZoneChange }) {
   const [streaming, setStreaming] = useState(false)
   const [chunksSent, setChunksSent] = useState(0)
   const [edgeNode, setEdgeNode] = useState(null)
   const [streamTitle, setStreamTitle] = useState('Diffusion Edge Direct')
-  const [selectedZone, setSelectedZone] = useState('Zone_1')
+  const [selectedZone, setSelectedZone] = useState(user?.current_zone || 'Zone_1')
   const [ws, setWs] = useState(null)
   const [mediaRecorder, setMediaRecorder] = useState(null)
   const blockIndexRef = useRef(0)
   const heartbeatTimerRef = useRef(null)
   const videoRef = useRef(null)
-  const [streamerKey] = useState(() => deriveStreamerKey(user.email))
+
+  // Gestionnaire de Mobilité Client conforme à la Section 3.4 du papier Sellami et al. (FGCS 2024)
+  const mobilityManagerRef = useRef(null)
+  if (!mobilityManagerRef.current) {
+    mobilityManagerRef.current = new ClientMobilityManager(user.email, user?.current_zone || 'Zone_1')
+  }
+  const [streamerCredentials, setStreamerCredentials] = useState(() => mobilityManagerRef.current.getCredentials())
+  const [mobilityNotice, setMobilityNotice] = useState(null)
+
+  // Synchronisation réactive si la zone déclarée est modifiée depuis le Header
+  useEffect(() => {
+    if (user?.current_zone && user.current_zone !== selectedZone) {
+      applyZoneTransition(user.current_zone, false)
+    }
+  }, [user?.current_zone])
+
+  function applyZoneTransition(newZone, notifyParent = true) {
+    const prevZone = selectedZone
+    setSelectedZone(newZone)
+    if (notifyParent && onZoneChange) {
+      onZoneChange(newZone)
+    }
+
+    const prevVisited = Array.from(mobilityManagerRef.current.visitedZones)
+    const updated = mobilityManagerRef.current.addZone(newZone)
+    setStreamerCredentials(updated)
+
+    if (streaming) {
+      // Mobilité homomorphe en cours de session : Sw <- Sw + Sw^k, PK <- PK + PK_k (Section 3.4)
+      const isNewAccumulation = !prevVisited.includes(newZone)
+      setMobilityNotice({
+        from: prevZone,
+        to: newZone,
+        isNewAccumulation,
+        visitedZones: updated.visitedZones,
+        time: new Date().toLocaleTimeString(),
+      })
+
+      // Notifier le nœud Edge connecté via WebSocket de la nouvelle clé publique de zone accumulée
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(
+            JSON.stringify({
+              type: 'mobility',
+              session_id: user.email,
+              owner_id: user.email,
+              zone_id: newZone,
+              zone_pk: updated.zonePk,
+              visited_zones: updated.visitedZones,
+            })
+          )
+        } catch (_) {}
+      }
+    }
+  }
 
   async function startStream() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
       if (videoRef.current) videoRef.current.srcObject = stream
 
+      // Le diffuseur prend par défaut sa zone déclarée pour l'allocation du nœud Fog
       const alloc = await apiRequest('/api/stream/allocate', {
         method: 'POST',
         body: JSON.stringify({ session_id: user.email, zone_id: selectedZone }),
@@ -870,9 +1085,9 @@ function StreamerInterface({ user }) {
         user.email
       )}${tokenParam}`
 
-      // Génération de la clé de délégation Fog pour le nœud assigné (Section 3.6.1)
+      // Délégation Fog calculée avec la part secrète Sw active (Section 3.6.1)
       const targetDelegateNode = alloc.edge_node_id || 'Local_Edge_Node'
-      const delegation = generateDelegationKey(streamerKey.secretKey, targetDelegateNode)
+      const delegation = generateDelegationKey(mobilityManagerRef.current.secretKey, targetDelegateNode)
 
       const socket = new WebSocket(directUploadUrl)
       blockIndexRef.current = 0
@@ -881,7 +1096,7 @@ function StreamerInterface({ user }) {
         setStreaming(true)
         setChunksSent(0)
 
-        // Transmission explicite de la délégation Fog dès l'ouverture du flux
+        // Transmission explicite de la délégation Fog et de la clé publique de zone
         socket.send(
           JSON.stringify({
             type: 'delegation',
@@ -889,7 +1104,8 @@ function StreamerInterface({ user }) {
             owner_id: user.email,
             delegation_key: delegation.delegationKey,
             delegate_pk: delegation.delegatePk,
-            zone_pk: streamerKey.zonePk,
+            zone_pk: mobilityManagerRef.current.zonePk,
+            emission_zone: selectedZone,
           })
         )
 
@@ -910,9 +1126,12 @@ function StreamerInterface({ user }) {
             const currentIdx = blockIndexRef.current
             blockIndexRef.current += 1
 
+            // Toujours signer avec la part secrète Sw active / accumulée selon Section 3.4
+            const activeSecretKey = mobilityManagerRef.current.secretKey
+            const activeZonePk = mobilityManagerRef.current.zonePk
             const paramA = alloc.paramA || DEFAULT_PARAM_A
             const vColumn = computeSisVector(chunkBytes, paramA)
-            const signature = signHessIBS(vColumn, streamerKey.secretKey, paramA)
+            const signature = signHessIBS(vColumn, activeSecretKey, paramA)
 
             const packet = {
               block_index: currentIdx,
@@ -921,7 +1140,9 @@ function StreamerInterface({ user }) {
               V_column: vColumn,
               signature: signature,
               signer_id: user.email,
-              zone_pk: streamerKey.zonePk,
+              zone_pk: activeZonePk,
+              emission_zone: selectedZone,
+              visited_zones: Array.from(mobilityManagerRef.current.visitedZones),
               is_delegated: false,
               delegation_key: delegation.delegationKey,
               delegate_pk: delegation.delegatePk,
@@ -961,6 +1182,7 @@ function StreamerInterface({ user }) {
     if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop()
     if (ws) ws.close()
     setStreaming(false)
+    setMobilityNotice(null)
     apiRequest(`/api/stream/stop/${encodeURIComponent(user.email)}`, { method: 'POST' }).catch(() => {})
     if (videoRef.current && videoRef.current.srcObject) {
       videoRef.current.srcObject.getTracks().forEach((t) => t.stop())
@@ -989,6 +1211,25 @@ function StreamerInterface({ user }) {
           </div>
         </div>
 
+        {/* Bannière de Mobilité Homomorphe (Section 3.4) */}
+        {streamerCredentials.visitedZones.length > 1 && (
+          <div className="mobility-status-banner">
+            <div className="mobility-banner-title">
+              <ZapIcon size={15} className="cyan" />
+              <span>Mobilité Homomorphe Multi-Zone Active (Section 3.4 du papier FGCS 2024)</span>
+            </div>
+            <div className="mobility-banner-details">
+              <span>Accumulation homomorphe des clés :</span>
+              {streamerCredentials.visitedZones.map((z) => (
+                <span key={z} className="mobility-zone-tag">
+                  {z === 'Zone_1' ? '📍 Zone 1 (Principale)' : '🌐 Zone 2 (Secondaire)'}
+                </span>
+              ))}
+              <span className="mobility-formula-tag">Sw ← Sw + Sw^k | PK ← PK + PK_k</span>
+            </div>
+          </div>
+        )}
+
         <div className="twitch-player-wrapper" style={{ maxHeight: '55vh' }}>
           <video ref={videoRef} autoPlay muted playsInline className="twitch-video-element" />
           {!streaming && (
@@ -1011,11 +1252,10 @@ function StreamerInterface({ user }) {
           )}
 
           <div style={{ marginLeft: 'auto', display: 'flex', gap: '10px', alignItems: 'center' }}>
-            <span style={{ fontSize: '12px', color: 'var(--muted)' }}>Zone :</span>
+            <span style={{ fontSize: '12px', color: 'var(--muted)' }}>📍 Zone d'émission :</span>
             <select
               value={selectedZone}
-              onChange={(e) => setSelectedZone(e.target.value)}
-              disabled={streaming}
+              onChange={(e) => applyZoneTransition(e.target.value, true)}
               style={{
                 background: '#090e1c',
                 border: '1px solid var(--line)',
@@ -1025,8 +1265,8 @@ function StreamerInterface({ user }) {
                 fontSize: '12px',
               }}
             >
-              <option value="Zone_1">Zone 1</option>
-              <option value="Zone_2">Zone 2</option>
+              <option value="Zone_1">Zone 1 (Principale)</option>
+              <option value="Zone_2">Zone 2 (Secondaire)</option>
             </select>
           </div>
         </div>
@@ -1196,7 +1436,11 @@ export default function App() {
     apiRequest('/auth/me')
       .then((data) => {
         if (data && data.user) {
-          setUser(data.user)
+          const loadedUser = {
+            ...data.user,
+            current_zone: data.user.current_zone || 'Zone_1',
+          }
+          setUser(loadedUser)
           if (data.user.role === 'admin') setCurrentView('admin')
           else if (data.user.role === 'streamer') setCurrentView('studio')
           else setCurrentView('live')
@@ -1239,6 +1483,23 @@ export default function App() {
   function handleSelectStream(streamId) {
     setSelectedStream(streamId)
     setCurrentView('live')
+  }
+
+  // Changement de zone à chaud avec mise à jour immédiate de l'état local et appel PUT /auth/zone
+  async function handleUserZoneChange(newZone) {
+    if (!user || user.current_zone === newZone) return
+    // 1. Mise à jour immédiate de l'état local user.current_zone
+    setUser((prev) => (prev ? { ...prev, current_zone: newZone } : prev))
+
+    // 2. Appel PUT /auth/zone
+    try {
+      await apiRequest('/auth/zone', {
+        method: 'PUT',
+        body: JSON.stringify({ current_zone: newZone, zone: newZone }),
+      })
+    } catch (err) {
+      console.warn('[PUT /auth/zone] Notification serveur:', err.message || err)
+    }
   }
 
   return (
@@ -1312,6 +1573,12 @@ export default function App() {
 
           {user ? (
             <>
+              {/* Badge & Sélecteur de Zone interactif dans le Header (Agent 3) */}
+              <ZoneHeaderSelector
+                currentZone={user.current_zone || 'Zone_1'}
+                onZoneChange={handleUserZoneChange}
+              />
+
               {user.role === 'streamer' && (
                 <button
                   type="button"
@@ -1360,7 +1627,7 @@ export default function App() {
         />
 
         {currentView === 'studio' && user?.role === 'streamer' ? (
-          <StreamerInterface user={user} />
+          <StreamerInterface user={user} onZoneChange={handleUserZoneChange} />
         ) : currentView === 'admin' && user?.role === 'admin' ? (
           <AdminDashboard user={user} />
         ) : currentView === 'live' ? (
@@ -1384,9 +1651,13 @@ export default function App() {
           mode={authMode}
           setMode={setAuthMode}
           onSuccess={(nextUser) => {
-            setUser(nextUser)
+            const normalizedUser = {
+              ...nextUser,
+              current_zone: nextUser.current_zone || 'Zone_1',
+            }
+            setUser(normalizedUser)
             setAuthMode(null)
-            if (nextUser.role === 'streamer') setCurrentView('studio')
+            if (normalizedUser.role === 'streamer') setCurrentView('studio')
             else setCurrentView('live')
           }}
           onClose={() => setAuthMode(null)}

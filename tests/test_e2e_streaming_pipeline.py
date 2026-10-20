@@ -42,7 +42,12 @@ def e2e_environment():
     original_storage = edge_module.DOSSIER_RACINE_STOCKAGE
     edge_module.DOSSIER_RACINE_STOCKAGE = temp_dir
 
-    port = 8446
+    import socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(('127.0.0.1', 0))
+    port = sock.getsockname()[1]
+    sock.close()
+
     node_id = "Edge_E2E_Paris_01"
     zone_id = "Zone_1"
 

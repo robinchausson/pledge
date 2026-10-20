@@ -1,18 +1,21 @@
 version: "3.8"
 
 services:
-  broker_mqtt:
+  # ============================================================================
+  # ZONE 1 : SERVICES D'INFRASTRUCTURE LOCALE
+  # ============================================================================
+  broker_mqtt_zone_1:
     build: ./broker_et_client/broker_mqtt
     image: pledge-broker-mqtt:latest
-    container_name: pledge_broker_mqtt
+    container_name: pledge_broker_mqtt_zone_1
     restart: unless-stopped
     ports:
-      - "18883:8883"
+      - "8883:8883"
       - "1883:1883"
     volumes:
       - ./broker_et_client/broker_mqtt/mosquitto.conf:/mosquitto/config/mosquitto.conf
       - ./broker_et_client/broker_mqtt/certs:/mosquitto/certs
-      - mosquitto_data:/mosquitto/data
+      - mosquitto_data_zone_1:/mosquitto/data
     networks:
       - pledge_net
     extra_hosts:
@@ -24,14 +27,15 @@ services:
       retries: 3
       start_period: 3s
 
-  crypto_node:
+  crypto_node_zone_1:
     build: ./serveur_crypto
     image: streamfog-crypto-node:latest
-    container_name: pledge_crypto_node
+    container_name: pledge_crypto_node_zone_1
     restart: unless-stopped
     ports:
       - "8443:8443"
     environment:
+      ZONE_ID: Zone_1
       CRYPTO_PORT: 8443
       CRYPTO_SECRET_SCALAR: 123456789
       TLS_CERT_FILE: /certs/tls.crt
@@ -49,33 +53,33 @@ services:
       retries: 3
       start_period: 5s
 
-  edge_node:
+  edge_node_zone_1:
     build: ./broker_et_client/client_mqtt
     image: pledge-client-edge:latest
-    container_name: pledge_client_edge
+    container_name: pledge_client_edge_zone_1
     restart: always
     ports:
       - "8444:8444"
     environment:
-      NODE_ID: Local_Edge_Node
+      NODE_ID: Local_Edge_Node_Zone_1
       ZONE_ID: Zone_1
       NODE_HOST: 127.0.0.1
       EDGE_WS_PORT: 8444
       EDGE_WS_SCHEME: ws
-      BROKER_HOST: broker_mqtt
+      BROKER_HOST: broker_mqtt_zone_1
       BROKER_PORT: 1883
-      CRYPTO_URL: https://crypto_node:8443
+      CRYPTO_URL: https://crypto_node_zone_1:8443
       EDGE_DATA_DIR: /donnees_isolees
       TELEMETRY_INTERVAL_SEC: 5
     volumes:
-      - edge_storage_data:/donnees_isolees
+      - edge_storage_data_zone_1:/donnees_isolees
     networks:
       - pledge_net
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
-      - broker_mqtt
-      - crypto_node
+      - broker_mqtt_zone_1
+      - crypto_node_zone_1
     healthcheck:
       test: ["CMD-SHELL", "python -c 'import socket; s = socket.socket(); s.settimeout(2); s.connect((\"127.0.0.1\", 8444))' || exit 1"]
       interval: 15s
@@ -83,6 +87,95 @@ services:
       retries: 3
       start_period: 5s
 
+  # ============================================================================
+  # ZONE 2 : SERVICES D'INFRASTRUCTURE LOCALE
+  # ============================================================================
+  broker_mqtt_zone_2:
+    build: ./broker_et_client/broker_mqtt
+    image: pledge-broker-mqtt:latest
+    container_name: pledge_broker_mqtt_zone_2
+    restart: unless-stopped
+    ports:
+      - "8884:8883"
+      - "1884:1883"
+    volumes:
+      - ./broker_et_client/broker_mqtt/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - ./broker_et_client/broker_mqtt/certs:/mosquitto/certs
+      - mosquitto_data_zone_2:/mosquitto/data
+    networks:
+      - pledge_net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 2 nc -z 127.0.0.1 8883 || timeout 2 nc -z 127.0.0.1 1883 || exit 0"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 3s
+
+  crypto_node_zone_2:
+    build: ./serveur_crypto
+    image: streamfog-crypto-node:latest
+    container_name: pledge_crypto_node_zone_2
+    restart: unless-stopped
+    ports:
+      - "8445:8443"
+    environment:
+      ZONE_ID: Zone_2
+      CRYPTO_PORT: 8443
+      CRYPTO_SECRET_SCALAR: 987654321
+      TLS_CERT_FILE: /certs/tls.crt
+      TLS_KEY_FILE: /certs/tls.key
+    volumes:
+      - ./serveur_crypto/certs:/certs
+    networks:
+      - pledge_net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request, ssl; ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE; urllib.request.urlopen(\"https://127.0.0.1:8443/health\", context=ctx, timeout=3)' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  edge_node_zone_2:
+    build: ./broker_et_client/client_mqtt
+    image: pledge-client-edge:latest
+    container_name: pledge_client_edge_zone_2
+    restart: always
+    ports:
+      - "8447:8447"
+    environment:
+      NODE_ID: Local_Edge_Node_Zone_2
+      ZONE_ID: Zone_2
+      NODE_HOST: 127.0.0.1
+      EDGE_WS_PORT: 8447
+      EDGE_WS_SCHEME: ws
+      BROKER_HOST: broker_mqtt_zone_2
+      BROKER_PORT: 1883
+      CRYPTO_URL: https://crypto_node_zone_2:8443
+      EDGE_DATA_DIR: /donnees_isolees
+      TELEMETRY_INTERVAL_SEC: 5
+    volumes:
+      - edge_storage_data_zone_2:/donnees_isolees
+    networks:
+      - pledge_net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - broker_mqtt_zone_2
+      - crypto_node_zone_2
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import socket; s = socket.socket(); s.settimeout(2); s.connect((\"127.0.0.1\", 8447))' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  # ============================================================================
+  # SERVEUR WEB CENTRAL LOCAL (FastAPI Backend + React Frontend)
+  # ============================================================================
   backend:
     build: ./serveur_web/backend
     image: pledge-backend:latest
@@ -91,23 +184,31 @@ services:
     ports:
       - "8000:8000"
     environment:
-      BROKER_HOST: broker_mqtt
+      BROKER_HOST_ZONE_1: broker_mqtt_zone_1
+      BROKER_PORT_ZONE_1: 1883
+      BROKER_TLS_ZONE_1: "false"
+      BROKER_HOST_ZONE_2: broker_mqtt_zone_2
+      BROKER_PORT_ZONE_2: 1883
+      BROKER_TLS_ZONE_2: "false"
+      BROKER_HOST: broker_mqtt_zone_1
       BROKER_PORT: 1883
-      BROKER_IP: broker_mqtt
-      CRYPTO_URL_ZONE_1: https://crypto_node:8443
+      BROKER_IP: broker_mqtt_zone_1
+      CRYPTO_URL_ZONE_1: https://crypto_node_zone_1:8443
+      CRYPTO_URL_ZONE_2: https://crypto_node_zone_2:8443
       CRYPTO_VERIFY_SSL: "false"
       DATABASE_URL: sqlite:///./data/app.db
       EDGE_WS_SCHEME: ws
     volumes:
-      # Persistance garantie de la base de données SQLite entre dev et prod
       - ./serveur_web/backend/data:/app/data
     networks:
       - pledge_net
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
-      - broker_mqtt
-      - crypto_node
+      - broker_mqtt_zone_1
+      - broker_mqtt_zone_2
+      - crypto_node_zone_1
+      - crypto_node_zone_2
     healthcheck:
       test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://127.0.0.1:8000/health\", timeout=3)' || exit 1"]
       interval: 15s
@@ -126,6 +227,8 @@ services:
       VITE_API_URL: http://localhost:8000
     networks:
       - pledge_net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - backend
 
@@ -134,6 +237,7 @@ networks:
     driver: bridge
 
 volumes:
-  mosquitto_data:
-  edge_storage_data:
-
+  mosquitto_data_zone_1:
+  mosquitto_data_zone_2:
+  edge_storage_data_zone_1:
+  edge_storage_data_zone_2:

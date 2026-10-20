@@ -12,11 +12,18 @@ import {
   verifyHessIBS,
   verifyDelegatedHessIBS,
   verifyIncomingBlock,
+  deriveStreamerKey,
   g1ToJson,
   g2ToJson,
   CURVE_ORDER,
   G1,
   G2,
+  ZONE_MASTER_SCALARS,
+  getZoneMasterScalar,
+  accumulateSecretKeys,
+  accumulatePublicKeys,
+  accumulateHomomorphicKeys,
+  ClientMobilityManager,
 } from '../serveur_web/frontend/src/cryptoClient.js'
 
 console.log('=== DÉBUT DES TESTS UNITAIRES FRONTEND CRYPTO (PHASE 5) ===')
@@ -144,5 +151,44 @@ assert.strictEqual(auditTampered.isValid, false)
 assert.strictEqual(auditTampered.isSisValid, false)
 console.log('  -> Succès : Altération d\'un seul bit détectée par le viewer local !')
 
-console.log('=== TOUS LES TESTS DU MODULE FRONTEND PASSENT AVEC SUCCÈS (7/7) ===')
+// Test 8: Mobilité Homomorphe Multi-Zone (Section 3.4)
+console.log('[Test 8] Support Client de la Mobilité Homomorphe (Section 3.4 du papier)...')
+const mobilityStreamer = 'nomad_streamer@pledge.local'
+const mobilityManager = new ClientMobilityManager(mobilityStreamer, 'Zone_1')
+assert.strictEqual(mobilityManager.currentZone, 'Zone_1')
+assert.deepStrictEqual(mobilityManager.visitedZones, new Set(['Zone_1']))
+
+// Étape 1 : Signature dans la zone initiale Zone 1
+const mobilityChunk1 = new TextEncoder().encode('Stream frame in initial Zone 1')
+const vMobility1 = computeSisVector(mobilityChunk1)
+const sigMobility1 = signHessIBS(vMobility1, mobilityManager.secretKey)
+const verifMobility1 = verifyHessIBS(vMobility1, sigMobility1, mobilityStreamer, mobilityManager.zonePk)
+assert.strictEqual(verifMobility1.valid, true)
+
+// Étape 2 : Transition vers Zone 2 -> Accumulation Homomorphe Sw <- Sw + Sw^2, PK <- PK + PK_2
+const credsAfterZ2 = mobilityManager.addZone('Zone_2')
+assert.strictEqual(credsAfterZ2.currentZone, 'Zone_2')
+assert.deepStrictEqual(credsAfterZ2.visitedZones, ['Zone_1', 'Zone_2'])
+
+// Nouvelle trame émise après transition de zone : signée avec la clé secrète accumulée
+const mobilityChunk2 = new TextEncoder().encode('Stream frame after mobility to Zone 2')
+const vMobility2 = computeSisVector(mobilityChunk2)
+const sigMobility2 = signHessIBS(vMobility2, mobilityManager.secretKey)
+
+// Doit être validée avec la clé publique accumulée PK
+const verifMobility2Accum = verifyHessIBS(vMobility2, sigMobility2, mobilityStreamer, mobilityManager.zonePk)
+assert.strictEqual(verifMobility2Accum.valid, true)
+
+// Doit échouer si vérifiée avec la seule clé publique de Zone 1
+const credsZ1Only = deriveStreamerKey(mobilityStreamer, ZONE_MASTER_SCALARS.Zone_1)
+const verifMobility2FailZ1 = verifyHessIBS(vMobility2, sigMobility2, mobilityStreamer, credsZ1Only.zonePk)
+assert.strictEqual(verifMobility2FailZ1.valid, false)
+
+// Test d'idempotence : ré-entrer dans Zone 2 ne doit pas double-accumuler
+const credsZ2Revisit = mobilityManager.addZone('Zone_2')
+assert.strictEqual(credsZ2Revisit.visitedZones.length, 2)
+assert.strictEqual(mobilityManager.secretKey[0], credsAfterZ2.secretKey[0])
+console.log('  -> Succès : Mobilité multi-zone avec accumulation homomorphe Sw et PK validée.')
+
+console.log('=== TOUS LES TESTS DU MODULE FRONTEND PASSENT AVEC SUCCÈS (8/8) ===')
 

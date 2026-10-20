@@ -485,11 +485,129 @@ export function base64ToUint8Array(b64) {
  * et la clé publique de zone PK = ts * G2 pour le diffuseur.
  */
 export function deriveStreamerKey(identity, masterScalar = 123456789n) {
-  const ts = BigInt(masterScalar)
+  let ts
+  if (typeof masterScalar === 'string' && ZONE_MASTER_SCALARS[masterScalar]) {
+    ts = BigInt(ZONE_MASTER_SCALARS[masterScalar])
+  } else {
+    ts = BigInt(masterScalar)
+  }
   const zonePkPoint = G2.Point.BASE.multiply(ts)
   const zonePk = g2ToJson(zonePkPoint)
   const h1Owner = hashH1ToG1(identity)
   const swPoint = h1Owner.multiply(ts)
   const secretKey = g1ToJson(swPoint)
   return { secretKey, zonePk, identity }
+}
+
+// =====================================================================
+// 8. MOBILITÉ MULTI-ZONE & ACCUMULATION HOMOMORPHE (Section 3.4)
+// =====================================================================
+
+export const ZONE_MASTER_SCALARS = {
+  Zone_1: 123456789n,
+  Zone_2: 987654321n,
+}
+
+export function getZoneMasterScalar(zoneId) {
+  if (zoneId && ZONE_MASTER_SCALARS[zoneId]) {
+    return ZONE_MASTER_SCALARS[zoneId]
+  }
+  return ZONE_MASTER_SCALARS.Zone_1
+}
+
+/**
+ * Accumulation homomorphe des parts secrètes dans G1 (Section 3.4.2 & 3.4.3) :
+ * S_w <- sum(S_w^k)
+ */
+export function accumulateSecretKeys(keys) {
+  if (!keys || keys.length === 0) return null
+  let total = jsonToG1(keys[0])
+  for (let i = 1; i < keys.length; i++) {
+    total = total.add(jsonToG1(keys[i]))
+  }
+  return g1ToJson(total)
+}
+
+/**
+ * Accumulation homomorphe des clés publiques de zones dans G2 (Section 3.4.2 & 3.4.3) :
+ * PK <- sum(PK_k)
+ */
+export function accumulatePublicKeys(pks) {
+  if (!pks || pks.length === 0) return null
+  let total = jsonToG2(pks[0])
+  for (let i = 1; i < pks.length; i++) {
+    total = total.add(jsonToG2(pks[i]))
+  }
+  return g2ToJson(total)
+}
+
+/**
+ * Addition homomorphe de clés entre deux zones (S_w <- S_w + S_w^k, PK <- PK + PK_k).
+ */
+export function accumulateHomomorphicKeys(existingCreds, newZoneCreds) {
+  const swPoint1 = jsonToG1(existingCreds.secretKey)
+  const swPoint2 = jsonToG1(newZoneCreds.secretKey)
+  const accumulatedSw = g1ToJson(swPoint1.add(swPoint2))
+
+  const pkPoint1 = jsonToG2(existingCreds.zonePk)
+  const pkPoint2 = jsonToG2(newZoneCreds.zonePk)
+  const accumulatedPk = g2ToJson(pkPoint1.add(pkPoint2))
+
+  return {
+    secretKey: accumulatedSw,
+    zonePk: accumulatedPk,
+  }
+}
+
+/**
+ * Client de gestion de mobilité multi-zone pour le diffuseur (Data Owner Ow).
+ * Implémente la Section 3.4 du papier Sellami et al. (FGCS 2024).
+ */
+export class ClientMobilityManager {
+  constructor(identity, initialZone = 'Zone_1') {
+    this.identity = String(identity || '').trim()
+    this.visitedZones = new Set()
+    this.secretKey = null
+    this.zonePk = null
+    this.currentZone = initialZone || 'Zone_1'
+    if (initialZone) {
+      this.addZone(initialZone)
+    }
+  }
+
+  addZone(zoneId) {
+    const cleanZone = zoneId || 'Zone_1'
+    this.currentZone = cleanZone
+    if (this.visitedZones.has(cleanZone)) {
+      return this.getCredentials()
+    }
+
+    const scalar = getZoneMasterScalar(cleanZone)
+    const newCreds = deriveStreamerKey(this.identity, scalar)
+    this.visitedZones.add(cleanZone)
+
+    if (!this.secretKey) {
+      this.secretKey = newCreds.secretKey
+      this.zonePk = newCreds.zonePk
+    } else {
+      const accumulated = accumulateHomomorphicKeys(
+        { secretKey: this.secretKey, zonePk: this.zonePk },
+        newCreds
+      )
+      this.secretKey = accumulated.secretKey
+      this.zonePk = accumulated.zonePk
+    }
+
+    return this.getCredentials()
+  }
+
+  getCredentials() {
+    return {
+      identity: this.identity,
+      secretKey: this.secretKey,
+      zonePk: this.zonePk,
+      visitedZones: Array.from(this.visitedZones),
+      currentZone: this.currentZone,
+    }
+  }
 }

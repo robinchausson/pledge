@@ -56,6 +56,7 @@ class StreamSession(Base):
     owner_email = Column(String, index=True)
     node_id = Column(String, ForeignKey("edge_nodes.node_id"), index=True)
     zone_id = Column(String)
+    current_zone = Column(String, default="Zone_1")
     status = Column(String, default="live", index=True)  # "live", "stopped", "failed"
     owner_pk = Column(String, default="")  # Clé publique G2 de la zone
     is_delegated = Column(Integer, default=0)
@@ -94,6 +95,8 @@ def _migrate_db():
                 conn.execute(text("ALTER TABLE stream_sessions ADD COLUMN delegate_id VARCHAR DEFAULT ''"))
             if "delegate_pk" not in existing_cols:
                 conn.execute(text("ALTER TABLE stream_sessions ADD COLUMN delegate_pk VARCHAR DEFAULT ''"))
+            if "current_zone" not in existing_cols:
+                conn.execute(text("ALTER TABLE stream_sessions ADD COLUMN current_zone VARCHAR DEFAULT 'Zone_1'"))
 
             # Table users
             res_users = conn.execute(text("PRAGMA table_info(users)"))

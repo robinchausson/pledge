@@ -20,27 +20,40 @@ MQTT_CLIENT_BASE_ID = os.getenv("MQTT_CLIENT_ID") or f"{MQTT_CLIENT_ID_PREFIX}_{
 _mqtt_clients: dict[str, mqtt.Client] = {}
 _mqtt_status: dict[str, bool] = {}
 _mqtt_lock = threading.Lock()
+_running = True
 
 
 def get_zone_broker_configs() -> dict[str, dict]:
-    """Retourne la configuration des brokers pour chaque zone de l'architecture."""
+    """Retourne la configuration des brokers pour chaque zone de l'architecture (Zone_1, Zone_2)."""
+    default_host = os.getenv("BROKER_HOST") or os.getenv("LAN_IP_BROKER") or os.getenv("BROKER_IP") or "127.0.0.1"
+    default_port = int(os.getenv("BROKER_PORT") or 1883)
+    default_tls = os.getenv("BROKER_TLS", "false").lower() in ("true", "1")
+    default_ca = os.getenv("BROKER_CA_CERT", "")
+
+    host_z1 = os.getenv("BROKER_HOST_ZONE_1") or default_host
+    port_z1 = int(os.getenv("BROKER_PORT_ZONE_1") or (8883 if os.getenv("BROKER_TLS_ZONE_1", "false").lower() in ("true", "1") else default_port))
+    tls_z1 = os.getenv("BROKER_TLS_ZONE_1", str(default_tls)).lower() in ("true", "1")
+    ca_z1 = os.getenv("BROKER_CA_CERT_ZONE_1", default_ca)
+
+    host_z2 = os.getenv("BROKER_HOST_ZONE_2") or os.getenv("BROKER_HOST_Z2") or default_host
+    port_z2 = int(os.getenv("BROKER_PORT_ZONE_2") or os.getenv("BROKER_PORT_Z2") or (8883 if os.getenv("BROKER_TLS_ZONE_2", "false").lower() in ("true", "1") else default_port))
+    tls_z2 = os.getenv("BROKER_TLS_ZONE_2", "false").lower() in ("true", "1")
+    ca_z2 = os.getenv("BROKER_CA_CERT_ZONE_2", "")
+
     configs = {
         "Zone_1": {
-            "host": os.getenv("BROKER_HOST_ZONE_1") or os.getenv("BROKER_HOST") or os.getenv("LAN_IP_BROKER") or os.getenv("BROKER_IP") or "127.0.0.1",
-            "port": int(os.getenv("BROKER_PORT_ZONE_1") or os.getenv("BROKER_PORT") or (8883 if os.getenv("BROKER_TLS_ZONE_1", "false").lower() in ("true", "1") else 1883)),
-            "tls": os.getenv("BROKER_TLS_ZONE_1", os.getenv("BROKER_TLS", "false")).lower() in ("true", "1"),
-            "ca_cert": os.getenv("BROKER_CA_CERT_ZONE_1", os.getenv("BROKER_CA_CERT", "")),
-        }
-    }
-
-    host_z2 = os.getenv("BROKER_HOST_ZONE_2")
-    if host_z2:
-        configs["Zone_2"] = {
+            "host": host_z1,
+            "port": port_z1,
+            "tls": tls_z1,
+            "ca_cert": ca_z1,
+        },
+        "Zone_2": {
             "host": host_z2,
-            "port": int(os.getenv("BROKER_PORT_ZONE_2") or (8883 if os.getenv("BROKER_TLS_ZONE_2", "false").lower() in ("true", "1") else 1883)),
-            "tls": os.getenv("BROKER_TLS_ZONE_2", "false").lower() in ("true", "1"),
-            "ca_cert": os.getenv("BROKER_CA_CERT_ZONE_2", ""),
-        }
+            "port": port_z2,
+            "tls": tls_z2,
+            "ca_cert": ca_z2,
+        },
+    }
     return configs
 
 
@@ -92,23 +105,35 @@ def make_on_message(zone_id: str):
                 if len(topic_parts) == 3:
                     msg_zone_id = topic_parts[1] or zone_id
                     node_id = topic_parts[2]
+                    detected_zone = payload.get("zone") or payload.get("zone_id") or msg_zone_id or zone_id
 
                     node = db.query(EdgeNode).filter(EdgeNode.node_id == node_id).first()
                     if not node:
-                        node = EdgeNode(node_id=node_id, zone_id=msg_zone_id)
+                        node = EdgeNode(node_id=node_id, zone_id=detected_zone)
                         db.add(node)
+                    else:
+                        node.zone_id = detected_zone
 
                     node.ip_address = payload.get("ip_address")
                     node.wss_port = payload.get("port_wss")
                     node.storage_available_gb = payload.get("stockage_dispo_gb")
                     node.cpu_usage_pct = payload.get("cpu_usage_pct")
-                    node.last_seen = datetime.datetime.utcnow()
+                    node.last_seen = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
                     db.commit()
 
                 # Topic granulaire : telemetrie/{ZONE_ID}/{NODE_ID}/clients/{client_id}
                 elif len(topic_parts) == 5 and topic_parts[3] == "clients":
+                    msg_zone_id = topic_parts[1] or zone_id
                     node_id = topic_parts[2]
                     client_id = topic_parts[4]
+                    detected_zone = payload.get("zone") or payload.get("zone_id") or msg_zone_id or zone_id
+
+                    node = db.query(EdgeNode).filter(EdgeNode.node_id == node_id).first()
+                    if node:
+                        node.zone_id = detected_zone
+                    else:
+                        node = EdgeNode(node_id=node_id, zone_id=detected_zone)
+                        db.add(node)
 
                     location = db.query(DataLocation).filter(
                         DataLocation.node_id == node_id,
@@ -125,7 +150,10 @@ def make_on_message(zone_id: str):
                     # Mettre à jour l'activité de la session si présente
                     session = db.query(StreamSession).filter(StreamSession.session_id == client_id).first()
                     if session and payload.get("active", True):
-                        session.last_active = datetime.datetime.utcnow()
+                        session.last_active = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+                        if detected_zone:
+                            session.zone_id = detected_zone
+                            session.current_zone = detected_zone
 
                     db.commit()
 
@@ -141,23 +169,29 @@ def _reconnect_loop(client, zone_id: str, host: str, port: int):
     """Boucle de surveillance et reconnexion résiliente par zone."""
     backoff = 2
     max_backoff = 30
-    while True:
+    while _running:
         if not _mqtt_status.get(zone_id, False):
             try:
                 print(f"[Backend MQTT] Tentative reconnexion au broker {zone_id} ({host}:{port})...", flush=True)
-                client.connect(host, port, 60)
+                client.reconnect()
                 time.sleep(3)
                 backoff = 2
-            except Exception as e:
-                time.sleep(backoff)
-                backoff = min(backoff * 2, max_backoff)
+            except Exception:
+                try:
+                    client.connect(host, port, 60)
+                    time.sleep(3)
+                    backoff = 2
+                except Exception:
+                    time.sleep(backoff)
+                    backoff = min(backoff * 2, max_backoff)
         else:
             time.sleep(5)
 
 
 def start_mqtt():
     """Démarre les clients MQTT pour toutes les zones configurées (Zone 1 + Zone 2)."""
-    global _mqtt_clients
+    global _mqtt_clients, _running
+    _running = True
 
     with _mqtt_lock:
         if _mqtt_clients:
@@ -200,6 +234,21 @@ def start_mqtt():
             ).start()
 
         return _mqtt_clients.get("Zone_1")
+
+
+def stop_mqtt():
+    """Arrête proprement tous les clients MQTT et stoppe les boucles de reconnexion."""
+    global _running, _mqtt_clients
+    _running = False
+    with _mqtt_lock:
+        for z_id, cl in list(_mqtt_clients.items()):
+            try:
+                cl.loop_stop()
+                cl.disconnect()
+            except Exception:
+                pass
+            _mqtt_status[z_id] = False
+        _mqtt_clients.clear()
 
 
 def publish_event(topic: str, payload: dict | str, target_zone: str | None = None):

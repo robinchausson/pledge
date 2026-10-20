@@ -13,7 +13,17 @@ from unittest.mock import MagicMock, patch
 from main import app
 from models import Base, engine, SessionLocal, User, EdgeNode, DataLocation, StreamSession
 import security
-from mqtt_client import make_on_message, publish_event
+from mqtt_client import (
+    make_on_message,
+    make_on_connect,
+    make_on_disconnect,
+    publish_event,
+    is_mqtt_connected,
+    get_mqtt_health,
+    _mqtt_clients,
+    _mqtt_status,
+    get_zone_broker_configs,
+)
 
 
 @pytest.fixture(scope="module")
@@ -241,3 +251,130 @@ def test_active_streams_filtering(client):
     assert id_active in streams
     assert id_stale not in streams
     assert id_stopped not in streams
+
+
+def test_multi_broker_mqtt_simultaneous_management_and_resilience():
+    """
+    Mission 1 : Test Multi-Broker MQTT Simulé
+    - Valide que le backend gère simultanément deux brokers MQTT distincts (Zone 1 et Zone 2).
+    - Vérifie la détection et la reprise sur panne si un seul broker tombe.
+    """
+    mock_client_z1 = MagicMock()
+    mock_client_z1._client_id = b"Backend_Controller_Zone_1"
+    mock_client_z2 = MagicMock()
+    mock_client_z2._client_id = b"Backend_Controller_Zone_2"
+
+    saved_clients = dict(_mqtt_clients)
+    saved_status = dict(_mqtt_status)
+
+    try:
+        _mqtt_clients["Zone_1"] = mock_client_z1
+        _mqtt_clients["Zone_2"] = mock_client_z2
+        _mqtt_status["Zone_1"] = False
+        _mqtt_status["Zone_2"] = False
+
+        on_connect_z1 = make_on_connect("Zone_1")
+        on_connect_z2 = make_on_connect("Zone_2")
+        on_disconnect_z1 = make_on_disconnect("Zone_1")
+        on_disconnect_z2 = make_on_disconnect("Zone_2")
+        on_message_z1 = make_on_message("Zone_1")
+        on_message_z2 = make_on_message("Zone_2")
+
+        # 1. Connexion simultanée des deux brokers
+        on_connect_z1(mock_client_z1, None, None, 0)
+        on_connect_z2(mock_client_z2, None, None, 0)
+
+        assert is_mqtt_connected("Zone_1") is True
+        assert is_mqtt_connected("Zone_2") is True
+        assert is_mqtt_connected() is True
+
+        mock_client_z1.subscribe.assert_called_with("telemetrie/#", qos=1)
+        mock_client_z2.subscribe.assert_called_with("telemetrie/#", qos=1)
+
+        # 2. Ingestion simultanée de télémétrie des deux zones
+        uid = uuid.uuid4().hex[:6]
+        node_z1_id = f"Edge_Sim_Z1_{uid}"
+        node_z2_id = f"Edge_Sim_Z2_{uid}"
+
+        msg_z1 = MagicMock()
+        msg_z1.topic = f"telemetrie/Zone_1/{node_z1_id}"
+        msg_z1.payload = json.dumps({
+            "ip_address": "192.168.1.50",
+            "port_wss": 8444,
+            "stockage_dispo_gb": 120.0,
+            "cpu_usage_pct": 14.2,
+        }).encode("utf-8")
+        on_message_z1(mock_client_z1, None, msg_z1)
+
+        msg_z2 = MagicMock()
+        msg_z2.topic = f"telemetrie/Zone_2/{node_z2_id}"
+        msg_z2.payload = json.dumps({
+            "ip_address": "192.168.2.60",
+            "port_wss": 8445,
+            "stockage_dispo_gb": 64.0,
+            "cpu_usage_pct": 32.5,
+        }).encode("utf-8")
+        on_message_z2(mock_client_z2, None, msg_z2)
+
+        # Vérification en base des deux nœuds dans leurs zones respectives
+        db = SessionLocal()
+        n1 = db.query(EdgeNode).filter(EdgeNode.node_id == node_z1_id).first()
+        n2 = db.query(EdgeNode).filter(EdgeNode.node_id == node_z2_id).first()
+        assert n1 is not None and n1.zone_id == "Zone_1" and n1.ip_address == "192.168.1.50"
+        assert n2 is not None and n2.zone_id == "Zone_2" and n2.ip_address == "192.168.2.60"
+        db.close()
+
+        # 3. Détection de panne : Déconnexion inattendue du Broker Zone 1
+        on_disconnect_z1(mock_client_z1, None, 1)
+
+        assert is_mqtt_connected("Zone_1") is False
+        assert is_mqtt_connected("Zone_2") is True
+        # Dégradation gracieuse : au moins un broker reste opérationnel
+        assert is_mqtt_connected() is True
+
+        # Télémétrie sur Zone 2 continue de fonctionner sans interruption
+        msg_z2_update = MagicMock()
+        msg_z2_update.topic = f"telemetrie/Zone_2/{node_z2_id}"
+        msg_z2_update.payload = json.dumps({
+            "ip_address": "192.168.2.60",
+            "port_wss": 8445,
+            "stockage_dispo_gb": 63.8,
+            "cpu_usage_pct": 35.0,
+        }).encode("utf-8")
+        on_message_z2(mock_client_z2, None, msg_z2_update)
+
+        db = SessionLocal()
+        n2_updated = db.query(EdgeNode).filter(EdgeNode.node_id == node_z2_id).first()
+        assert n2_updated.cpu_usage_pct == 35.0
+        db.close()
+
+        # 4. Reprise sur panne : Reconnexion du Broker Zone 1
+        on_connect_z1(mock_client_z1, None, None, 0)
+        assert is_mqtt_connected("Zone_1") is True
+        assert is_mqtt_connected("Zone_2") is True
+
+        # 5. Routage des publications ciblées et en diffusion (broadcast)
+        publish_event("pledge/commands/purge", {"session_id": "test_s1"}, target_zone="Zone_1")
+        mock_client_z1.publish.assert_called_with("pledge/commands/purge", json.dumps({"session_id": "test_s1"}), qos=1)
+        mock_client_z2.publish.assert_not_called()
+
+        mock_client_z1.reset_mock()
+        mock_client_z2.reset_mock()
+
+        publish_event("pledge/commands/purge", {"session_id": "test_s2"}, target_zone="Zone_2")
+        mock_client_z2.publish.assert_called_with("pledge/commands/purge", json.dumps({"session_id": "test_s2"}), qos=1)
+        mock_client_z1.publish.assert_not_called()
+
+        mock_client_z1.reset_mock()
+        mock_client_z2.reset_mock()
+
+        # Diffusion globale sans target_zone
+        publish_event("pledge/broadcast/sync", {"cmd": "sync_all"})
+        mock_client_z1.publish.assert_called_with("pledge/broadcast/sync", json.dumps({"cmd": "sync_all"}), qos=1)
+        mock_client_z2.publish.assert_called_with("pledge/broadcast/sync", json.dumps({"cmd": "sync_all"}), qos=1)
+
+    finally:
+        _mqtt_clients.clear()
+        _mqtt_clients.update(saved_clients)
+        _mqtt_status.clear()
+        _mqtt_status.update(saved_status)

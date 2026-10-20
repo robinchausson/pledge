@@ -8,16 +8,19 @@ import uuid
 import httpx
 import websockets
 from typing import Any, Optional
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPException, Query, status
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPException, Query, status, Request
+import jwt
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 try:
-    from .models import get_db, EdgeNode, DataLocation, StreamSession
+    from .models import get_db, EdgeNode, DataLocation, StreamSession, User
     from .security import create_stream_token
+    from . import security
 except ImportError:
-    from models import get_db, EdgeNode, DataLocation, StreamSession
+    from models import get_db, EdgeNode, DataLocation, StreamSession, User
     from security import create_stream_token
+    import security
 
 router = APIRouter()
 
@@ -60,13 +63,14 @@ crypto_client = httpx.AsyncClient(
 # --- MODÈLES PYDANTIC POUR LA SIGNALISATION PHASE 4 ---
 class AllocateStreamRequest(BaseModel):
     session_id: str = Field(..., description="Identifiant unique de session ou email du diffuseur")
-    zone_id: str | None = Field(default="Zone_1", description="Zone géographique demandée")
+    zone_id: Optional[str] = Field(default=None, description="Zone géographique demandée")
 
 
 class AllocateStreamResponse(BaseModel):
     session_id: str
     edge_node_id: str
     zone_id: str
+    current_zone: Optional[str] = "Zone_1"
     upload_url: str
     token: Optional[str] = None
     edge_host: str
@@ -80,6 +84,7 @@ class DiscoverStreamResponse(BaseModel):
     status: str
     edge_node_id: str
     zone_id: str
+    current_zone: Optional[str] = "Zone_1"
     download_url: str
     token: Optional[str] = None
     transcoded_download_url: Optional[str] = None
@@ -105,57 +110,87 @@ class PackageBlockApiRequest(BaseModel):
 
 
 def select_best_edge_node(db: Session, zone_id: str = "Zone_1") -> EdgeNode:
-    """Sélectionne le meilleur nœud Edge actif en fonction de last_seen, CPU et espace disque."""
-    threshold = datetime.datetime.utcnow() - datetime.timedelta(seconds=45)
+    """
+    Sélectionne le meilleur nœud Edge actif en favorisant STRICTEMENT
+    les nœuds Edge de la zone déclarée de l'utilisateur.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    threshold = now - datetime.timedelta(seconds=45)
+    fallback_threshold = now - datetime.timedelta(minutes=5)
+    zone_target = zone_id or "Zone_1"
 
-    # 1. Nœuds actifs récents dans la zone demandée (vrais nœuds connectés)
-    active_nodes = (
+    def node_perf_score(n: EdgeNode) -> float:
+        storage = n.storage_available_gb or 0.0
+        cpu = n.cpu_usage_pct or 0.0
+        return storage - (cpu / 10.0)
+
+    # 1. Nœuds actifs récents dans la zone déclarée (priorité absolue)
+    zone_active = (
+        db.query(EdgeNode)
+        .filter(EdgeNode.node_id != "Edge_Node_01")
+        .filter(EdgeNode.zone_id == zone_target)
+        .filter(EdgeNode.last_seen >= threshold)
+        .all()
+    )
+    if zone_active:
+        zone_active.sort(key=node_perf_score, reverse=True)
+        return zone_active[0]
+
+    # 2. Repli zone déclarée : nœuds vus récemment (< 5 min)
+    zone_fallback = (
+        db.query(EdgeNode)
+        .filter(EdgeNode.node_id != "Edge_Node_01")
+        .filter(EdgeNode.zone_id == zone_target)
+        .filter(EdgeNode.last_seen >= fallback_threshold)
+        .all()
+    )
+    if zone_fallback:
+        zone_fallback.sort(key=node_perf_score, reverse=True)
+        return zone_fallback[0]
+
+    # 3. Repli : autres nœuds actifs d'autres zones
+    other_active = (
         db.query(EdgeNode)
         .filter(EdgeNode.node_id != "Edge_Node_01")
         .filter(EdgeNode.last_seen >= threshold)
         .all()
     )
+    if other_active:
+        other_active.sort(key=node_perf_score, reverse=True)
+        return other_active[0]
 
-    if not active_nodes:
-        # Repli : autres vrais nœuds vus récemment
-        fallback_threshold = datetime.datetime.utcnow() - datetime.timedelta(minutes=5)
-        active_nodes = (
-            db.query(EdgeNode)
-            .filter(EdgeNode.node_id != "Edge_Node_01")
-            .filter(EdgeNode.last_seen >= fallback_threshold)
-            .all()
-        )
+    # 4. Repli : autres nœuds vus récemment (< 5 min)
+    other_fallback = (
+        db.query(EdgeNode)
+        .filter(EdgeNode.node_id != "Edge_Node_01")
+        .filter(EdgeNode.last_seen >= fallback_threshold)
+        .all()
+    )
+    if other_fallback:
+        other_fallback.sort(key=node_perf_score, reverse=True)
+        return other_fallback[0]
 
-    if not active_nodes:
-        # Nœud par défaut jusqu'à ce que des vrais nœuds se connectent
+    # 5. Repli : nœud par défaut pour la zone demandée
+    default_node = db.query(EdgeNode).filter(EdgeNode.node_id == f"Edge_Node_Default_{zone_target}").first()
+    if not default_node and zone_target == "Zone_1":
         default_node = db.query(EdgeNode).filter(EdgeNode.node_id == "Edge_Node_01").first()
-        if not default_node:
-            default_node = EdgeNode(
-                node_id="Edge_Node_01",
-                zone_id=zone_id or "Zone_1",
-                ip_address=os.getenv("EDGE_DEFAULT_HOST", "127.0.0.1"),
-                wss_port=int(os.getenv("EDGE_DEFAULT_PORT", "8444")),
-                storage_available_gb=50.0,
-                cpu_usage_pct=10.0,
-                last_seen=datetime.datetime.utcnow(),
-            )
-            db.add(default_node)
-            db.commit()
-            db.refresh(default_node)
-        else:
-            default_node.last_seen = datetime.datetime.utcnow()
-            db.commit()
-        return default_node
-
-    # Score de sélection : favorise le stockage disponible et pénalise la charge CPU
-    def node_score(n: EdgeNode):
-        storage = n.storage_available_gb or 0.0
-        cpu = n.cpu_usage_pct or 0.0
-        zone_bonus = 100.0 if n.zone_id == zone_id else 0.0
-        return zone_bonus + storage - (cpu / 10.0)
-
-    active_nodes.sort(key=node_score, reverse=True)
-    return active_nodes[0]
+    if not default_node:
+        default_node = EdgeNode(
+            node_id=f"Edge_Node_Default_{zone_target}" if zone_target != "Zone_1" else "Edge_Node_01",
+            zone_id=zone_target,
+            ip_address=os.getenv("EDGE_DEFAULT_HOST", "127.0.0.1"),
+            wss_port=int(os.getenv("EDGE_DEFAULT_PORT", "8444")),
+            storage_available_gb=50.0,
+            cpu_usage_pct=10.0,
+            last_seen=now,
+        )
+        db.add(default_node)
+        db.commit()
+        db.refresh(default_node)
+    else:
+        default_node.last_seen = now
+        db.commit()
+    return default_node
 
 
 # =====================================================================
@@ -163,7 +198,11 @@ def select_best_edge_node(db: Session, zone_id: str = "Zone_1") -> EdgeNode:
 # =====================================================================
 
 @router.post("/api/stream/allocate", response_model=AllocateStreamResponse)
-def allocate_edge_node(req: AllocateStreamRequest, db: Session = Depends(get_db)):
+def allocate_edge_node(
+    req: AllocateStreamRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
     """
     Plan de Signalisation : Le diffuseur demande l'allocation d'un nœud Fog.
     Le backend retourne l'adresse WebSocket DIRECTE du nœud Edge.
@@ -173,10 +212,39 @@ def allocate_edge_node(req: AllocateStreamRequest, db: Session = Depends(get_db)
     if not session_id:
         raise HTTPException(status_code=400, detail="session_id requis")
 
-    target_node = select_best_edge_node(db, req.zone_id or "Zone_1")
+    # Si le diffuseur ne spécifie pas explicitement zone_id, utiliser son current_zone déclaré
+    effective_zone = None
+    if req.zone_id and req.zone_id.strip():
+        effective_zone = req.zone_id.strip()
+    else:
+        # 1. Vérifier si l'utilisateur est authentifié par cookie JWT
+        token = request.cookies.get("access_token")
+        if token:
+            try:
+                payload = jwt.decode(token, security.SECRET_KEY, algorithms=[security.ALGORITHM])
+                user_id = payload.get("sub")
+                if user_id:
+                    user_by_token = db.query(User).filter(User.id == int(user_id)).first()
+                    if user_by_token and user_by_token.current_zone:
+                        effective_zone = user_by_token.current_zone
+            except Exception:
+                pass
+
+        # 2. Si pas trouvé par cookie, chercher par email / session_id
+        if not effective_zone:
+            user_by_email = db.query(User).filter(User.email == session_id).first()
+            if user_by_email and user_by_email.current_zone:
+                effective_zone = user_by_email.current_zone
+
+        # 3. Repli par défaut sur Zone_1
+        if not effective_zone:
+            effective_zone = "Zone_1"
+
+    target_node = select_best_edge_node(db, effective_zone)
     if not target_node:
         raise HTTPException(status_code=503, detail="Aucun nœud Edge disponible")
 
+    now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
     # Inscription immédiate de la session en base de données
     stream_session = db.query(StreamSession).filter(StreamSession.session_id == session_id).first()
     if not stream_session:
@@ -185,15 +253,17 @@ def allocate_edge_node(req: AllocateStreamRequest, db: Session = Depends(get_db)
             owner_email=session_id,
             node_id=target_node.node_id,
             zone_id=target_node.zone_id,
+            current_zone=effective_zone,
             status="live",
-            last_active=datetime.datetime.utcnow(),
+            last_active=now,
         )
         db.add(stream_session)
     else:
         stream_session.status = "live"
         stream_session.node_id = target_node.node_id
         stream_session.zone_id = target_node.zone_id
-        stream_session.last_active = datetime.datetime.utcnow()
+        stream_session.current_zone = effective_zone
+        stream_session.last_active = now
 
     # Mise à jour de l'emplacement des données
     location = db.query(DataLocation).filter(
@@ -208,12 +278,13 @@ def allocate_edge_node(req: AllocateStreamRequest, db: Session = Depends(get_db)
 
     token = create_stream_token(session_id, role="streamer", node_id=target_node.node_id)
     upload_url = f"{EDGE_WS_SCHEME}://{target_node.ip_address}:{target_node.wss_port}/upload/{session_id}?token={token}"
-    print(f"[Signalisation] Session {session_id} allouée sur {target_node.node_id} ({upload_url})", flush=True)
+    print(f"[Signalisation] Session {session_id} allouée sur {target_node.node_id} (Zone {target_node.zone_id}, demandée: {effective_zone}) ({upload_url})", flush=True)
 
     return AllocateStreamResponse(
         session_id=session_id,
         edge_node_id=target_node.node_id,
         zone_id=target_node.zone_id,
+        current_zone=effective_zone,
         upload_url=upload_url,
         token=token,
         edge_host=target_node.ip_address or "127.0.0.1",
@@ -259,6 +330,7 @@ def discover_stream_node(session_id: str, mode: str = "live", db: Session = Depe
         status=session.status if session else "live",
         edge_node_id=source_node.node_id,
         zone_id=source_node.zone_id,
+        current_zone=source_node.zone_id,
         download_url=download_url,
         token=token,
         transcoded_download_url=transcoded_download_url,
@@ -278,7 +350,7 @@ def stream_heartbeat(session_id: str, db: Session = Depends(get_db)):
     session = db.query(StreamSession).filter(StreamSession.session_id == clean_session_id).first()
     if session:
         session.status = "live"
-        session.last_active = datetime.datetime.utcnow()
+        session.last_active = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
         db.commit()
     return {"status": "ok", "session_id": clean_session_id}
 
@@ -290,7 +362,7 @@ def stop_stream_session(session_id: str, db: Session = Depends(get_db)):
     session = db.query(StreamSession).filter(StreamSession.session_id == clean_session_id).first()
     if session:
         session.status = "stopped"
-        session.last_active = datetime.datetime.utcnow()
+        session.last_active = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
         db.commit()
 
     # Nettoyer l'emplacement et la mémoire des blocs de ce flux

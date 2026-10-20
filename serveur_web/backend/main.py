@@ -13,13 +13,13 @@ try:
     from .models import get_db, User, SessionLocal, EdgeNode, DataLocation, StreamSession
     from . import schemas, security
     from .stream_router import router as stream_router, crypto_client, CRYPTO_SERVERS
-    from .mqtt_client import start_mqtt, is_mqtt_connected, get_mqtt_health
+    from .mqtt_client import start_mqtt, stop_mqtt, is_mqtt_connected, get_mqtt_health
 except ImportError:
     from models import get_db, User, SessionLocal, EdgeNode, DataLocation, StreamSession
     import schemas
     import security
     from stream_router import router as stream_router, crypto_client, CRYPTO_SERVERS
-    from mqtt_client import start_mqtt, is_mqtt_connected, get_mqtt_health
+    from mqtt_client import start_mqtt, stop_mqtt, is_mqtt_connected, get_mqtt_health
 
 mqtt_client_instance = None
 
@@ -56,6 +56,8 @@ async def lifespan(app: FastAPI):
         db.close()
 
     yield
+
+    stop_mqtt()
 
     if mqtt_client_instance:
         try:
@@ -138,7 +140,12 @@ def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="L'email est déjà utilisé")
 
     hashed_pwd = security.get_password_hash(user.password)
-    new_user = User(email=user.email, hashed_password=hashed_pwd, role=user.role)
+    new_user = User(
+        email=user.email,
+        hashed_password=hashed_pwd,
+        role=user.role,
+        current_zone=user.current_zone or "Zone_1",
+    )
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
@@ -158,7 +165,14 @@ def login(user_credentials: schemas.UserLogin, response: Response, db: Session =
     response.set_cookie(key="access_token", value=access_token, httponly=True, secure=False, samesite="Lax", max_age=security.ACCESS_TOKEN_EXPIRE_MINUTES * 60)
     response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, secure=False, samesite="Lax", max_age=security.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60)
 
-    return {"message": "Connexion réussie", "user": {"email": user.email, "role": user.role}}
+    return {
+        "message": "Connexion réussie",
+        "user": {
+            "email": user.email,
+            "role": user.role,
+            "current_zone": user.current_zone or "Zone_1",
+        },
+    }
 
 
 # --- 3. DÉCONNEXION ---
@@ -198,7 +212,34 @@ def get_current_user(request: Request, db: Session = Depends(get_db)):
 # --- 4. RÉCUPÉRER L'UTILISATEUR CONNECTÉ ---
 @app.get("/auth/me")
 def get_me(current_user: User = Depends(get_current_user)):
-    return {"user": {"email": current_user.email, "role": current_user.role}}
+    return {
+        "user": {
+            "email": current_user.email,
+            "role": current_user.role,
+            "current_zone": current_user.current_zone or "Zone_1",
+        }
+    }
+
+
+# --- 5. DÉCLARATION & BASCULE DE ZONE UTILISATEUR ---
+@app.put("/auth/zone")
+def update_user_zone(
+    zone_data: schemas.UserZoneUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    current_user.current_zone = zone_data.zone_id
+    db.commit()
+    db.refresh(current_user)
+    return {
+        "message": f"Zone mise à jour vers {current_user.current_zone}",
+        "current_zone": current_user.current_zone,
+        "user": {
+            "email": current_user.email,
+            "role": current_user.role,
+            "current_zone": current_user.current_zone,
+        },
+    }
 
 
 # --- EXEMPLE DE ROUTE PROTÉGÉE ---
