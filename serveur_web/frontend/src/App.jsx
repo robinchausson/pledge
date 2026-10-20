@@ -361,6 +361,7 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
   const [streamEmissionZone, setStreamEmissionZone] = useState('Zone_1')
   const [isShardedStream, setIsShardedStream] = useState(false)
   const [shardNodesCount, setShardNodesCount] = useState(1)
+  const [unreachableNodes, setUnreachableNodes] = useState([])
   const [isPlaying, setIsPlaying] = useState(true)
   const [isMuted, setIsMuted] = useState(true)
   const [volume, setVolume] = useState(1)
@@ -481,6 +482,7 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
     setQuality(q)
     setWatching(true)
     setChunksReceived(0)
+    setUnreachableNodes([])
     setAuditStatus('idle')
     setAuditMetrics({
       sisTimeMs: 0,
@@ -739,7 +741,7 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
                   flushResequencingQueue()
                 }
               }
-            }, 400)
+            }, 90)
           }
         } else {
           queue.push(playableChunk)
@@ -783,6 +785,10 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
         const socket = new WebSocket(directDownloadUrl)
         socket.binaryType = 'arraybuffer'
         socket.onmessage = handleIncomingBlock
+        socket.onerror = () => {
+          console.warn(`[Viewer] Échec connexion au nœud shard ${nodeInfo.edge_node_id} (${directDownloadUrl})`)
+          setUnreachableNodes((prev) => (prev.includes(nodeInfo.edge_node_id) ? prev : [...prev, nodeInfo.edge_node_id]))
+        }
         socket.onclose = () => {
           if (viewerSocketsRef.current) {
             const anyActive = viewerSocketsRef.current.some(
@@ -835,6 +841,7 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
     setConnectedNode(null)
     setEdgeDeliveryZone('Zone_1')
     setStreamEmissionZone('Zone_1')
+    setUnreachableNodes([])
     setAuditStatus('idle')
   }
 
@@ -884,6 +891,11 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
                   {isShardedStream && (
                     <span className="player-overlay-pill" style={{ color: '#38bdf8', borderColor: 'rgba(56, 189, 248, 0.4)' }} title="Agrégation simultanée depuis plusieurs nœuds Fog (Option B)">
                       ⚡ Fog Sharding ({shardNodesCount} Nœuds)
+                    </span>
+                  )}
+                  {unreachableNodes.length > 0 && (
+                    <span className="player-overlay-pill" style={{ color: '#f87171', borderColor: 'rgba(239, 68, 68, 0.5)', background: 'rgba(239, 68, 68, 0.15)' }} title={`Nœud(s) Fog injoignable(s) : ${unreachableNodes.join(', ')}`}>
+                      ⚠️ Nœud {unreachableNodes.join(', ')} hors ligne
                     </span>
                   )}
                 </div>

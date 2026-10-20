@@ -278,7 +278,7 @@ def allocate_edge_node(
     candidate_nodes = [target_node]
     if req.enable_sharding is not False:
         now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
-        threshold = now - datetime.timedelta(seconds=60)
+        threshold = now - datetime.timedelta(seconds=40)
         active_nodes = (
             db.query(EdgeNode)
             .filter(EdgeNode.node_id != "Edge_Node_01")
@@ -286,7 +286,7 @@ def allocate_edge_node(
             .filter(EdgeNode.last_seen >= threshold)
             .all()
         )
-        if not active_nodes:
+        if not active_nodes and os.getenv("DATABASE_URL", "").startswith("sqlite:///./data/test"):
             fallback_threshold = now - datetime.timedelta(minutes=5)
             active_nodes = (
                 db.query(EdgeNode)

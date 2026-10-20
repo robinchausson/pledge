@@ -171,6 +171,7 @@ def make_on_message(zone_id: str):
 
 def _reconnect_loop(client, zone_id: str, host: str, port: int):
     """Boucle de surveillance et reconnexion résiliente par zone."""
+    time.sleep(3)  # Laisse le temps à connect_async d'effectuer la négociation initiale
     backoff = 2
     max_backoff = 30
     while _running:
