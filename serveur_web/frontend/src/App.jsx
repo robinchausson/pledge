@@ -536,6 +536,10 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
       let gapTimeout = null
 
       function flushResequencingQueue() {
+        // En WebM MSE, le conteneur ne peut jamais démarrer sans le bloc d'en-tête EBML (bloc 0)
+        if (!seenBlockZero && !resequencingMap.has(0)) {
+          return
+        }
         while (resequencingMap.has(expectedBlockIndex)) {
           const chunkToPlay = resequencingMap.get(expectedBlockIndex)
           resequencingMap.delete(expectedBlockIndex)
@@ -731,10 +735,11 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
           flushResequencingQueue()
 
           // Mécanisme de sécurité anti-blocage (si un bloc intermédiaire est perdu)
+          // ATTENTION : Ne JAMAIS sauter le bloc 0 tant qu'il n'a pas été injecté (sinon MSE crash avec Decode Error)
           if (resequencingMap.size > 0 && !gapTimeout) {
             gapTimeout = setTimeout(() => {
               gapTimeout = null
-              if (resequencingMap.size > 0) {
+              if (resequencingMap.size > 0 && seenBlockZero) {
                 const keys = Array.from(resequencingMap.keys()).sort((a, b) => a - b)
                 if (keys[0] > expectedBlockIndex) {
                   expectedBlockIndex = keys[0]
