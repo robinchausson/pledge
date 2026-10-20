@@ -85,6 +85,8 @@ class DiscoverStreamResponse(BaseModel):
     edge_node_id: str
     zone_id: str
     current_zone: Optional[str] = "Zone_1"
+    stream_zone: Optional[str] = None
+    viewer_zone: Optional[str] = None
     download_url: str
     token: Optional[str] = None
     transcoded_download_url: Optional[str] = None
@@ -295,7 +297,12 @@ def allocate_edge_node(
 
 
 @router.get("/api/stream/discover/{session_id}", response_model=DiscoverStreamResponse)
-def discover_stream_node(session_id: str, mode: str = "live", db: Session = Depends(get_db)):
+def discover_stream_node(
+    session_id: str,
+    mode: str = "live",
+    viewer_zone: Optional[str] = Query(None, description="Zone géographique déclarée du visionneur"),
+    db: Session = Depends(get_db),
+):
     """
     Plan d'Annuaire : Le spectateur interroge le backend pour localiser le nœud Edge
     qui détient le flux vidéo, puis s'y connecte DIRECTEMENT sans transiter par le backend.
@@ -316,21 +323,39 @@ def discover_stream_node(session_id: str, mode: str = "live", db: Session = Depe
         else:
             raise HTTPException(status_code=404, detail=f"Flux {clean_session_id} introuvable")
 
-    source_node = db.query(EdgeNode).filter(EdgeNode.node_id == target_node_id).first()
+    # Recherche du nœud Edge le plus approprié pour le visionneur
+    locations = db.query(DataLocation).filter(DataLocation.client_id == clean_session_id).all()
+    source_node = None
+    if viewer_zone and locations:
+        for loc in locations:
+            candidate = db.query(EdgeNode).filter(EdgeNode.node_id == loc.node_id, EdgeNode.zone_id == viewer_zone).first()
+            if candidate:
+                source_node = candidate
+                break
+
+    if not source_node and target_node_id:
+        source_node = db.query(EdgeNode).filter(EdgeNode.node_id == target_node_id).first()
+
+    if not source_node and locations:
+        source_node = db.query(EdgeNode).filter(EdgeNode.node_id == locations[0].node_id).first()
+
     if not source_node:
-        raise HTTPException(status_code=404, detail=f"Nœud hôte {target_node_id} introuvable")
+        raise HTTPException(status_code=404, detail=f"Nœud hôte pour flux {clean_session_id} introuvable")
 
     token = create_stream_token(clean_session_id, role="viewer", node_id=source_node.node_id)
     download_url = f"{EDGE_WS_SCHEME}://{source_node.ip_address}:{source_node.wss_port}/download/{clean_session_id}?mode={mode}&token={token}"
     transcoded_download_url = f"{EDGE_WS_SCHEME}://{source_node.ip_address}:{source_node.wss_port}/download/{clean_session_id}?mode={mode}&quality=720p&token={token}"
     print(f"[Signalisation] Visionneur orienté vers {source_node.node_id} (Direct={download_url}, Transcodé={transcoded_download_url})", flush=True)
 
+    emission_zone = session.zone_id if session and session.zone_id else source_node.zone_id
     return DiscoverStreamResponse(
         session_id=clean_session_id,
         status=session.status if session else "live",
         edge_node_id=source_node.node_id,
         zone_id=source_node.zone_id,
         current_zone=source_node.zone_id,
+        stream_zone=emission_zone,
+        viewer_zone=viewer_zone or source_node.zone_id,
         download_url=download_url,
         token=token,
         transcoded_download_url=transcoded_download_url,

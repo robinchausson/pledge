@@ -71,6 +71,13 @@ class EdgeTranscoder:
         clean_id = re.sub(r'[^a-zA-Z0-9_\-.]', '_', session_id.strip())
         self.delegations[clean_id] = del_info
 
+    def update_zone_pk(self, session_id: str, zone_pk: any):
+        """Met a jour la cle publique de zone accumulee apres mobilite."""
+        clean_id = re.sub(r'[^a-zA-Z0-9_\-.]', '_', session_id.strip())
+        for sid in (session_id, clean_id):
+            if sid in self.delegations:
+                self.delegations[sid]['zone_pk'] = zone_pk
+
     def ensure_delegation(
         self,
         session_id: str,

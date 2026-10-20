@@ -247,6 +247,18 @@ async def reception_flux_video(websocket, client_id):
                             await websocket.send(json.dumps({"statut": "delegation_ok"}))
                             continue
 
+                        # Message explicite de mobilite multi-zone (Section 3.4 FGCS 2024)
+                        if packet_obj.get("type") == "mobility":
+                            new_zone_pk = packet_obj.get("zone_pk")
+                            if edge_transcoder and new_zone_pk:
+                                edge_transcoder.update_zone_pk(
+                                    session_id=clean_id,
+                                    zone_pk=new_zone_pk,
+                                )
+                                print(f"[{NODE_ID}] Cle publique de zone mise a jour suite a mobilite pour session {clean_id}", flush=True)
+                            await websocket.send(json.dumps({"statut": "mobility_ok"}))
+                            continue
+
                         bloc_id = packet_obj.get("block_index", compteur_bloc)
                         if "payload_b64" in packet_obj:
                             chunk_size = len(packet_obj["payload_b64"])

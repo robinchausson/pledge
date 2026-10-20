@@ -390,6 +390,13 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
     }
   }, [selectedStreamId])
 
+  // Re-découverte automatique du flux le plus approprié lorsque le visionneur change de zone
+  useEffect(() => {
+    if (watching && streamId) {
+      startWatching(streamId, quality)
+    }
+  }, [user?.current_zone])
+
   useEffect(() => {
     return () => {
       if (wsRef.current) {
@@ -467,7 +474,8 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
 
     try {
       // 1. Découverte du nœud Edge Fog via le backend
-      const discovery = await apiRequest(`/api/stream/discover/${encodeURIComponent(targetId)}?mode=start&quality=${q}`)
+      const viewerZoneParam = user?.current_zone ? `&viewer_zone=${encodeURIComponent(user.current_zone)}` : ''
+      const discovery = await apiRequest(`/api/stream/discover/${encodeURIComponent(targetId)}?mode=start&quality=${q}${viewerZoneParam}`)
       setConnectedNode(discovery.edge_node_id)
       setEdgeDeliveryZone(discovery.zone_id || 'Zone_1')
       if (discovery.stream_zone) {
@@ -757,6 +765,9 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
                     onClick={jumpToLive}
                   >
                     <span className="pulse-dot" /> EN DIRECT
+                  </span>
+                  <span className="player-overlay-pill" style={{ background: 'rgba(56, 130, 246, 0.2)', border: '1px solid rgba(56, 130, 246, 0.4)' }} title="Votre zone géographique déclarée">
+                    📍 Votre zone : {user?.current_zone === 'Zone_2' ? 'Zone 2' : 'Zone 1'}
                   </span>
                   <span className="player-overlay-pill emission" title="Zone géographique d'émission du flux">
                     <RadioIcon size={12} /> Émission : {streamEmissionZone === 'Zone_2' ? 'Zone 2' : 'Zone 1'}
@@ -1282,26 +1293,6 @@ function TwitchBrowse({ streams, onSelectStream, openAuth }) {
   return (
     <div className="twitch-main-stage">
       <div className="viewer-clean-container" style={{ padding: '32px 0' }}>
-        <div className="twitch-hero-banner" style={{ marginBottom: '32px' }}>
-          <div className="hero-banner-copy">
-            <span className="live-badge" style={{ marginBottom: '10px' }}>
-              <span className="pulse-dot" /> STREAM BEYOND
-            </span>
-            <h1>Streaming Décentralisé Nouvelle Génération</h1>
-            <p>
-              Plateforme haute fidélité propulsée par le Fog computing avec intégrité cryptographique prouvée sans tiers de confiance.
-            </p>
-            <div style={{ display: 'flex', gap: '10px' }}>
-              <button className="button button-primary" onClick={() => openAuth('register')}>
-                Rejoindre le réseau
-              </button>
-              <button className="button button-quiet" onClick={() => openAuth('login')}>
-                Se connecter
-              </button>
-            </div>
-          </div>
-        </div>
-
         <div>
           <h2 style={{ fontSize: '16px', marginBottom: '14px', display: 'flex', alignItems: 'center', gap: '8px' }}>
             <RadioIcon size={18} className="green" /> Flux en direct
