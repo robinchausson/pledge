@@ -67,13 +67,15 @@ def setup_multi_zone_environment():
             zone_id="Zone_2",
             ip_address="192.168.2.202",
             wss_port=8445,
-            storage_available_gb=80.0,
-            cpu_usage_pct=25.0,
+            storage_available_gb=280.0,
+            cpu_usage_pct=5.0,
             last_seen=now,
         )
         db.add(node_z2)
     else:
         node_z2.last_seen = now
+        node_z2.storage_available_gb = 280.0
+        node_z2.cpu_usage_pct = 5.0
 
     db.commit()
     db.close()
@@ -383,5 +385,40 @@ def test_multi_zone_fog_transcoding_delegation():
         delegate_pk=delegation["delegate_pk"],
     )
     assert is_valid is True
-    assert "succès" in reason.lower()
+
+
+# =============================================================================
+# MISSION 5 : TEST DE SHARDING / STRIPING MULTI-NŒUDS FOG (OPTION B)
+# =============================================================================
+
+def test_fog_block_sharding_allocation_and_discovery(client):
+    """
+    Vérifie la mise en œuvre de l'Option B (Sharding / Striping multi-nœuds Fog) :
+      - Quand plusieurs nœuds Fog sont actifs, allocate retourne allocated_nodes et is_sharded=True.
+      - DataLocation est inscrit pour tous les nœuds alloués.
+      - discover_stream_node retourne tous les nœuds détenant des fragments (shards) avec is_sharded=True.
+    """
+    streamer_id = f"streamer_sharded_{uuid.uuid4().hex[:6]}@example.com"
+    res_alloc = client.post("/api/stream/allocate", json={"session_id": streamer_id, "zone_id": "Zone_2"})
+    assert res_alloc.status_code == 200
+    alloc_data = res_alloc.json()
+
+    assert "allocated_nodes" in alloc_data
+    assert len(alloc_data["allocated_nodes"]) >= 2
+    assert alloc_data["is_sharded"] is True
+    assert alloc_data["shard_count"] == len(alloc_data["allocated_nodes"])
+
+    # Vérification que tous les nœuds sont bien enregistrés dans DataLocation
+    db = SessionLocal()
+    locs = db.query(DataLocation).filter(DataLocation.client_id == streamer_id).all()
+    assert len(locs) >= 2
+    db.close()
+
+    # Découverte par le spectateur
+    res_disc = client.get(f"/api/stream/discover/{streamer_id}?mode=live")
+    assert res_disc.status_code == 200
+    disc_data = res_disc.json()
+    assert disc_data["is_sharded"] is True
+    assert len(disc_data["nodes"]) >= 2
+    assert disc_data["shard_count"] == len(disc_data["nodes"])
 

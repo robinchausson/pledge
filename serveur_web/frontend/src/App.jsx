@@ -359,6 +359,8 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
   const [connectedNode, setConnectedNode] = useState(null)
   const [edgeDeliveryZone, setEdgeDeliveryZone] = useState('Zone_1')
   const [streamEmissionZone, setStreamEmissionZone] = useState('Zone_1')
+  const [isShardedStream, setIsShardedStream] = useState(false)
+  const [shardNodesCount, setShardNodesCount] = useState(1)
   const [isPlaying, setIsPlaying] = useState(true)
   const [isMuted, setIsMuted] = useState(true)
   const [volume, setVolume] = useState(1)
@@ -367,6 +369,7 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
   const [ws, setWs] = useState(null)
   const hasJumpedToLiveRef = useRef(false)
   const wsRef = useRef(null)
+  const viewerSocketsRef = useRef([])
 
   // Audit Public d'Intégrité sans TPA (Phase 5)
   const [auditStatus, setAuditStatus] = useState('idle') // 'idle' | 'intact' | 'delegated' | 'tampered'
@@ -399,6 +402,14 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
 
   useEffect(() => {
     return () => {
+      if (viewerSocketsRef.current) {
+        viewerSocketsRef.current.forEach((s) => {
+          try {
+            s.close()
+          } catch (_) {}
+        })
+        viewerSocketsRef.current = []
+      }
       if (wsRef.current) {
         try {
           wsRef.current.close()
@@ -445,6 +456,14 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
     const targetId = idToWatch || streamId
     if (!targetId) return
 
+    if (viewerSocketsRef.current) {
+      viewerSocketsRef.current.forEach((s) => {
+        try {
+          s.close()
+        } catch (_) {}
+      })
+      viewerSocketsRef.current = []
+    }
     if (wsRef.current) {
       try {
         wsRef.current.close()
@@ -473,7 +492,7 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
     })
 
     try {
-      // 1. Découverte du nœud Edge Fog via le backend
+      // 1. Découverte des nœuds Edge Fog via le backend (avec support Sharding Option B)
       const viewerZoneParam = user?.current_zone ? `&viewer_zone=${encodeURIComponent(user.current_zone)}` : ''
       const discovery = await apiRequest(`/api/stream/discover/${encodeURIComponent(targetId)}?mode=start&quality=${q}${viewerZoneParam}`)
       setConnectedNode(discovery.edge_node_id)
@@ -482,26 +501,24 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
         setStreamEmissionZone(discovery.stream_zone)
       }
 
-      const defaultZonePk = deriveStreamerKey(targetId).zonePk
+      const isSharded = Boolean(discovery.is_sharded && discovery.nodes && discovery.nodes.length > 1)
+      setIsShardedStream(isSharded)
+      setShardNodesCount(isSharded ? discovery.nodes.length : 1)
 
-      // 2. Connexion directe WebSocket au nœud Edge Fog
-      const isLocalHost =
-        !discovery.edge_host ||
-        discovery.edge_host === '127.0.0.1' ||
-        discovery.edge_host === 'localhost' ||
-        discovery.edge_host === 'host.docker.internal'
-      const edgeHost = isLocalHost ? window.location.hostname : discovery.edge_host
-      let token = discovery.token
-      if (!token && discovery.download_url) {
-        try {
-          const u = new URL(discovery.download_url)
-          token = u.searchParams.get('token')
-        } catch (_) {}
-      }
-      const tokenParam = token ? `&token=${encodeURIComponent(token)}` : ''
-      const directDownloadUrl = `${discovery.scheme || 'ws'}://${edgeHost}:${discovery.edge_port}/download/${encodeURIComponent(
-        targetId
-      )}?mode=start&quality=${q}${tokenParam}`
+      const nodesToDownload = isSharded
+        ? discovery.nodes
+        : [{
+            edge_node_id: discovery.edge_node_id,
+            zone_id: discovery.zone_id,
+            download_url: q === '720p' && discovery.transcoded_download_url ? discovery.transcoded_download_url : discovery.download_url,
+            transcoded_download_url: discovery.transcoded_download_url,
+            token: discovery.token,
+            edge_host: discovery.edge_host,
+            edge_port: discovery.edge_port,
+            scheme: discovery.scheme,
+          }]
+
+      const defaultZonePk = deriveStreamerKey(targetId).zonePk
 
       const mediaSource = new MediaSource()
       const mediaSourceUrl = URL.createObjectURL(mediaSource)
@@ -509,6 +526,22 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
       const queue = []
       let retryTimeout = null
       let appendRetryCount = 0
+
+      // File de réordonnancement stricte pour le Sharding Multi-Nœuds (Section 3.1 & 3.2 Sellami et al.)
+      const resequencingMap = new Map()
+      let expectedBlockIndex = 0
+      let seenBlockZero = false
+      let gapTimeout = null
+
+      function flushResequencingQueue() {
+        while (resequencingMap.has(expectedBlockIndex)) {
+          const chunkToPlay = resequencingMap.get(expectedBlockIndex)
+          resequencingMap.delete(expectedBlockIndex)
+          queue.push(chunkToPlay)
+          expectedBlockIndex++
+        }
+        processQueue()
+      }
 
       function processQueue() {
         if (!sourceBuffer || sourceBuffer.updating || queue.length === 0) return
@@ -617,11 +650,7 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
       }
       attachVideo()
 
-      // Connexion WebSocket avec écouteur onmessage immédiat pour ne perdre aucun bloc (notamment bloc 0)
-      const socket = new WebSocket(directDownloadUrl)
-      socket.binaryType = 'arraybuffer'
-
-      socket.onmessage = async (event) => {
+      const handleIncomingBlock = async (event) => {
         let chunk = null
         let packet = null
 
@@ -682,8 +711,40 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
 
         setChunksReceived((c) => c + 1)
         const playableChunk = extractPlayableMediaChunk(chunk)
-        queue.push(playableChunk)
-        processQueue()
+
+        // Resequencing Buffer pour le Sharding Multi-Nœuds (Option B)
+        const bIndex = packet && typeof packet.block_index === 'number' ? packet.block_index : null
+
+        if (bIndex !== null) {
+          // Si c'est le bloc 0 et qu'on l'a déjà reçu (répliqué sur chaque nœud shard), ignorer le doublon
+          if (bIndex === 0) {
+            if (seenBlockZero) return
+            seenBlockZero = true
+          }
+
+          // Si le bloc est antérieur à l'index déjà injecté dans MSE, ignorer
+          if (bIndex < expectedBlockIndex) return
+
+          resequencingMap.set(bIndex, playableChunk)
+          flushResequencingQueue()
+
+          // Mécanisme de sécurité anti-blocage (si un bloc intermédiaire est perdu)
+          if (resequencingMap.size > 0 && !gapTimeout) {
+            gapTimeout = setTimeout(() => {
+              gapTimeout = null
+              if (resequencingMap.size > 0) {
+                const keys = Array.from(resequencingMap.keys()).sort((a, b) => a - b)
+                if (keys[0] > expectedBlockIndex) {
+                  expectedBlockIndex = keys[0]
+                  flushResequencingQueue()
+                }
+              }
+            }, 400)
+          }
+        } else {
+          queue.push(playableChunk)
+          processQueue()
+        }
 
         if (videoRef.current && videoRef.current.paused && auditStatus !== 'tampered') {
           videoRef.current.play().catch(() => {
@@ -695,15 +756,50 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
         }
       }
 
-      socket.onclose = () => {
-        if (wsRef.current === socket) {
-          wsRef.current = null
-        }
-        setWatching(false)
-      }
+      // Connexion aux nœuds hébergeurs (un ou plusieurs selon mode sharding)
+      const sockets = []
+      viewerSocketsRef.current = sockets
 
-      wsRef.current = socket
-      setWs(socket)
+      nodesToDownload.forEach((nodeInfo) => {
+        const isLocalHost =
+          !nodeInfo.edge_host ||
+          nodeInfo.edge_host === '127.0.0.1' ||
+          nodeInfo.edge_host === 'localhost' ||
+          nodeInfo.edge_host === 'host.docker.internal'
+        const edgeHost = isLocalHost ? window.location.hostname : nodeInfo.edge_host
+        let token = nodeInfo.token
+        const targetUrl = q === '720p' && nodeInfo.transcoded_download_url ? nodeInfo.transcoded_download_url : nodeInfo.download_url
+        if (!token && targetUrl) {
+          try {
+            const u = new URL(targetUrl)
+            token = u.searchParams.get('token')
+          } catch (_) {}
+        }
+        const tokenParam = token ? `&token=${encodeURIComponent(token)}` : ''
+        const directDownloadUrl = `${nodeInfo.scheme || 'ws'}://${edgeHost}:${nodeInfo.edge_port}/download/${encodeURIComponent(
+          targetId
+        )}?mode=start&quality=${q}${tokenParam}`
+
+        const socket = new WebSocket(directDownloadUrl)
+        socket.binaryType = 'arraybuffer'
+        socket.onmessage = handleIncomingBlock
+        socket.onclose = () => {
+          if (viewerSocketsRef.current) {
+            const anyActive = viewerSocketsRef.current.some(
+              (s) => s.readyState === WebSocket.OPEN || s.readyState === WebSocket.CONNECTING
+            )
+            if (!anyActive) {
+              setWatching(false)
+            }
+          }
+        }
+        sockets.push(socket)
+      })
+
+      if (sockets.length > 0) {
+        wsRef.current = sockets[0]
+        setWs(sockets[0])
+      }
     } catch (err) {
       console.error('Erreur découverte flux:', err)
       alert(`Erreur de localisation du flux : ${err.message || err}`)
@@ -712,6 +808,14 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
   }
 
   function stopWatching() {
+    if (viewerSocketsRef.current) {
+      viewerSocketsRef.current.forEach((s) => {
+        try {
+          s.close()
+        } catch (_) {}
+      })
+      viewerSocketsRef.current = []
+    }
     if (wsRef.current) {
       try {
         wsRef.current.close()
@@ -775,6 +879,11 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
                   {connectedNode && (
                     <span className="player-overlay-pill fog" title="Nœud Edge local de livraison">
                       <ServerIcon size={12} /> Nœud Edge : {connectedNode} ({edgeDeliveryZone === 'Zone_2' ? 'Zone 2' : 'Zone 1'})
+                    </span>
+                  )}
+                  {isShardedStream && (
+                    <span className="player-overlay-pill" style={{ color: '#38bdf8', borderColor: 'rgba(56, 189, 248, 0.4)' }} title="Agrégation simultanée depuis plusieurs nœuds Fog (Option B)">
+                      ⚡ Fog Sharding ({shardNodesCount} Nœuds)
                     </span>
                   )}
                 </div>
@@ -1003,6 +1112,8 @@ function StreamerInterface({ user, onZoneChange }) {
   const [streaming, setStreaming] = useState(false)
   const [chunksSent, setChunksSent] = useState(0)
   const [edgeNode, setEdgeNode] = useState(null)
+  const [shardedNodes, setShardedNodes] = useState([])
+  const [isSharded, setIsSharded] = useState(false)
   const [streamTitle, setStreamTitle] = useState('Diffusion Edge Direct')
   const [selectedZone, setSelectedZone] = useState(user?.current_zone || 'Zone_1')
   const [ws, setWs] = useState(null)
@@ -1010,6 +1121,7 @@ function StreamerInterface({ user, onZoneChange }) {
   const blockIndexRef = useRef(0)
   const heartbeatTimerRef = useRef(null)
   const videoRef = useRef(null)
+  const socketsRef = useRef([])
 
   // Gestionnaire de Mobilité Client conforme à la Section 3.4 du papier Sellami et al. (FGCS 2024)
   const mobilityManagerRef = useRef(null)
@@ -1048,19 +1160,26 @@ function StreamerInterface({ user, onZoneChange }) {
         time: new Date().toLocaleTimeString(),
       })
 
-      // Notifier le nœud Edge connecté via WebSocket de la nouvelle clé publique de zone accumulée
-      if (ws && ws.readyState === WebSocket.OPEN) {
+      // Notifier tous les nœuds Edge connectés via WebSocket de la nouvelle clé publique de zone accumulée
+      const mobilityMsg = JSON.stringify({
+        type: 'mobility',
+        session_id: user.email,
+        owner_id: user.email,
+        zone_id: newZone,
+        zone_pk: updated.zonePk,
+        visited_zones: updated.visitedZones,
+      })
+      if (socketsRef.current) {
+        socketsRef.current.forEach((s) => {
+          if (s && s.readyState === WebSocket.OPEN) {
+            try {
+              s.send(mobilityMsg)
+            } catch (_) {}
+          }
+        })
+      } else if (ws && ws.readyState === WebSocket.OPEN) {
         try {
-          ws.send(
-            JSON.stringify({
-              type: 'mobility',
-              session_id: user.email,
-              owner_id: user.email,
-              zone_id: newZone,
-              zone_pk: updated.zonePk,
-              visited_zones: updated.visitedZones,
-            })
-          )
+          ws.send(mobilityMsg)
         } catch (_) {}
       }
     }
@@ -1078,110 +1197,162 @@ function StreamerInterface({ user, onZoneChange }) {
       })
       setEdgeNode(alloc.edge_node_id)
 
-      const isLocalHost =
-        !alloc.edge_host ||
-        alloc.edge_host === '127.0.0.1' ||
-        alloc.edge_host === 'localhost' ||
-        alloc.edge_host === 'host.docker.internal'
-      const edgeHost = isLocalHost ? window.location.hostname : alloc.edge_host
-      let token = alloc.token
-      if (!token && alloc.upload_url) {
-        try {
-          const u = new URL(alloc.upload_url)
-          token = u.searchParams.get('token')
-        } catch (_) {}
-      }
-      const tokenParam = token ? `?token=${encodeURIComponent(token)}` : ''
-      const directUploadUrl = `${alloc.scheme || 'ws'}://${edgeHost}:${alloc.edge_port}/upload/${encodeURIComponent(
-        user.email
-      )}${tokenParam}`
+      const isShardedAlloc = Boolean(alloc.is_sharded && alloc.allocated_nodes && alloc.allocated_nodes.length > 1)
+      setIsSharded(isShardedAlloc)
+      const nodesToConnect = isShardedAlloc
+        ? alloc.allocated_nodes
+        : [{
+            edge_node_id: alloc.edge_node_id,
+            zone_id: alloc.zone_id,
+            upload_url: alloc.upload_url,
+            token: alloc.token,
+            edge_host: alloc.edge_host,
+            edge_port: alloc.edge_port,
+            scheme: alloc.scheme,
+          }]
+      setShardedNodes(nodesToConnect)
 
-      // Délégation Fog calculée avec la part secrète Sw active (Section 3.6.1)
-      const targetDelegateNode = alloc.edge_node_id || 'Local_Edge_Node'
-      const delegation = generateDelegationKey(mobilityManagerRef.current.secretKey, targetDelegateNode)
-
-      const socket = new WebSocket(directUploadUrl)
       blockIndexRef.current = 0
+      const sockets = []
+      socketsRef.current = sockets
+      let recorderStarted = false
 
-      socket.onopen = () => {
-        setStreaming(true)
-        setChunksSent(0)
+      nodesToConnect.forEach((nodeInfo) => {
+        const isLocalHost =
+          !nodeInfo.edge_host ||
+          nodeInfo.edge_host === '127.0.0.1' ||
+          nodeInfo.edge_host === 'localhost' ||
+          nodeInfo.edge_host === 'host.docker.internal'
+        const edgeHost = isLocalHost ? window.location.hostname : nodeInfo.edge_host
+        let token = nodeInfo.token
+        if (!token && nodeInfo.upload_url) {
+          try {
+            const u = new URL(nodeInfo.upload_url)
+            token = u.searchParams.get('token')
+          } catch (_) {}
+        }
+        const tokenParam = token ? `?token=${encodeURIComponent(token)}` : ''
+        const directUploadUrl = `${nodeInfo.scheme || 'ws'}://${edgeHost}:${nodeInfo.edge_port}/upload/${encodeURIComponent(
+          user.email
+        )}${tokenParam}`
 
-        // Transmission explicite de la délégation Fog et de la clé publique de zone
-        socket.send(
-          JSON.stringify({
-            type: 'delegation',
-            session_id: user.email,
-            owner_id: user.email,
-            delegation_key: delegation.delegationKey,
-            delegate_pk: delegation.delegatePk,
-            zone_pk: mobilityManagerRef.current.zonePk,
-            emission_zone: selectedZone,
-          })
-        )
+        const targetDelegateNode = nodeInfo.edge_node_id || 'Local_Edge_Node'
+        const delegation = generateDelegationKey(mobilityManagerRef.current.secretKey, targetDelegateNode)
 
-        const mime = MediaRecorder.isTypeSupported('video/webm; codecs=vp8,opus')
-          ? 'video/webm; codecs=vp8,opus'
-          : 'video/webm'
-        const recorderOptions = { mimeType: mime }
-        try {
-          recorderOptions.videoKeyFrameIntervalDuration = 1000
-        } catch (_) {}
-        const recorder = new MediaRecorder(stream, recorderOptions)
+        const socket = new WebSocket(directUploadUrl)
 
-        recorder.ondataavailable = async (e) => {
-          if (e.data.size > 0 && socket.readyState === WebSocket.OPEN) {
-            const buffer = await e.data.arrayBuffer()
-            const chunkBytes = new Uint8Array(buffer)
-            const payloadB64 = uint8ArrayToBase64(chunkBytes)
-            const currentIdx = blockIndexRef.current
-            blockIndexRef.current += 1
-
-            // Toujours signer avec la part secrète Sw active / accumulée selon Section 3.4
-            const activeSecretKey = mobilityManagerRef.current.secretKey
-            const activeZonePk = mobilityManagerRef.current.zonePk
-            const paramA = alloc.paramA || DEFAULT_PARAM_A
-            const vColumn = computeSisVector(chunkBytes, paramA)
-            const signature = signHessIBS(vColumn, activeSecretKey, paramA)
-
-            const packet = {
-              block_index: currentIdx,
-              payload_b64: payloadB64,
-              paramA: paramA,
-              V_column: vColumn,
-              signature: signature,
-              signer_id: user.email,
-              zone_pk: activeZonePk,
-              emission_zone: selectedZone,
-              visited_zones: Array.from(mobilityManagerRef.current.visitedZones),
-              is_delegated: false,
+        socket.onopen = () => {
+          socket.send(
+            JSON.stringify({
+              type: 'delegation',
+              session_id: user.email,
+              owner_id: user.email,
               delegation_key: delegation.delegationKey,
               delegate_pk: delegation.delegatePk,
+              zone_pk: mobilityManagerRef.current.zonePk,
+              emission_zone: selectedZone,
+            })
+          )
+
+          if (!recorderStarted) {
+            recorderStarted = true
+            setStreaming(true)
+            setChunksSent(0)
+
+            const mime = MediaRecorder.isTypeSupported('video/webm; codecs=vp8,opus')
+              ? 'video/webm; codecs=vp8,opus'
+              : 'video/webm'
+            const recorderOptions = { mimeType: mime }
+            try {
+              recorderOptions.videoKeyFrameIntervalDuration = 1000
+            } catch (_) {}
+            const recorder = new MediaRecorder(stream, recorderOptions)
+
+            recorder.ondataavailable = async (e) => {
+              if (e.data.size > 0) {
+                const openSockets = socketsRef.current.filter((s) => s.readyState === WebSocket.OPEN)
+                if (openSockets.length === 0) return
+
+                const buffer = await e.data.arrayBuffer()
+                const chunkBytes = new Uint8Array(buffer)
+                const payloadB64 = uint8ArrayToBase64(chunkBytes)
+                const currentIdx = blockIndexRef.current
+                blockIndexRef.current += 1
+
+                // Toujours signer avec la part secrète Sw active / accumulée selon Section 3.4
+                const activeSecretKey = mobilityManagerRef.current.secretKey
+                const activeZonePk = mobilityManagerRef.current.zonePk
+                const paramA = alloc.paramA || DEFAULT_PARAM_A
+                const vColumn = computeSisVector(chunkBytes, paramA)
+                const signature = signHessIBS(vColumn, activeSecretKey, paramA)
+
+                const packet = {
+                  block_index: currentIdx,
+                  payload_b64: payloadB64,
+                  paramA: paramA,
+                  V_column: vColumn,
+                  signature: signature,
+                  signer_id: user.email,
+                  zone_pk: activeZonePk,
+                  emission_zone: selectedZone,
+                  visited_zones: Array.from(mobilityManagerRef.current.visitedZones),
+                  is_delegated: false,
+                  delegation_key: delegation.delegationKey,
+                  delegate_pk: delegation.delegatePk,
+                }
+                const packetJson = JSON.stringify(packet)
+
+                if (currentIdx === 0) {
+                  // Bloc 0 : En-tête d'initialisation WebM (EBML/Tracks) répliqué sur TOUS les nœuds pour amorçage MSE
+                  openSockets.forEach((s) => {
+                    try {
+                      s.send(packetJson)
+                    } catch (_) {}
+                  })
+                } else {
+                  // Sharding / Striping Round-Robin : D_i -> FN_{(i-1) mod K} (Section 3.1 & 3.2 Sellami et al.)
+                  const targetSocket = openSockets[(currentIdx - 1) % openSockets.length]
+                  try {
+                    targetSocket.send(packetJson)
+                  } catch (_) {
+                    openSockets[0].send(packetJson)
+                  }
+                }
+                setChunksSent((c) => c + 1)
+              }
             }
 
-            socket.send(JSON.stringify(packet))
-            setChunksSent((c) => c + 1)
+            recorder.start(1000)
+            setMediaRecorder(recorder)
+
+            heartbeatTimerRef.current = setInterval(() => {
+              apiRequest(`/api/stream/heartbeat/${encodeURIComponent(user.email)}`, { method: 'POST' }).catch(() => {})
+            }, 8000)
           }
         }
 
-        recorder.start(1000)
-        setMediaRecorder(recorder)
-
-        heartbeatTimerRef.current = setInterval(() => {
-          apiRequest(`/api/stream/heartbeat/${encodeURIComponent(user.email)}`, { method: 'POST' }).catch(() => {})
-        }, 8000)
-      }
-
-      socket.onclose = () => {
-        setStreaming(false)
-        if (heartbeatTimerRef.current) clearInterval(heartbeatTimerRef.current)
-        if (videoRef.current && videoRef.current.srcObject) {
-          videoRef.current.srcObject.getTracks().forEach((t) => t.stop())
-          videoRef.current.srcObject = null
+        socket.onclose = () => {
+          if (socketsRef.current) {
+            const anyActive = socketsRef.current.some(
+              (s) => s.readyState === WebSocket.OPEN || s.readyState === WebSocket.CONNECTING
+            )
+            if (!anyActive) {
+              setStreaming(false)
+              if (heartbeatTimerRef.current) clearInterval(heartbeatTimerRef.current)
+              if (videoRef.current && videoRef.current.srcObject) {
+                videoRef.current.srcObject.getTracks().forEach((t) => t.stop())
+                videoRef.current.srcObject = null
+              }
+            }
+          }
         }
-      }
 
-      setWs(socket)
+        sockets.push(socket)
+      })
+
+      if (sockets.length > 0) {
+        setWs(sockets[0])
+      }
     } catch (e) {
       console.error('Erreur démarrage stream:', e)
       alert("Accès caméra refusé ou nœud Edge injoignable.")
@@ -1191,6 +1362,14 @@ function StreamerInterface({ user, onZoneChange }) {
   function stopStream() {
     if (heartbeatTimerRef.current) clearInterval(heartbeatTimerRef.current)
     if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop()
+    if (socketsRef.current) {
+      socketsRef.current.forEach((s) => {
+        try {
+          s.close()
+        } catch (_) {}
+      })
+      socketsRef.current = []
+    }
     if (ws) ws.close()
     setStreaming(false)
     setMobilityNotice(null)
@@ -1217,6 +1396,11 @@ function StreamerInterface({ user, onZoneChange }) {
             {streaming && edgeNode && (
               <span className="player-overlay-pill fog">
                 <ServerIcon size={12} /> {edgeNode}
+              </span>
+            )}
+            {streaming && isSharded && (
+              <span className="player-overlay-pill" style={{ color: '#38bdf8', borderColor: 'rgba(56, 189, 248, 0.4)' }} title="Partitionnement du flux sur plusieurs nœuds Fog (Option B)">
+                📦 Sharding ({shardedNodes.length} Nœuds)
               </span>
             )}
           </div>

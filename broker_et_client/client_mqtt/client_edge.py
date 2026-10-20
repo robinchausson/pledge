@@ -429,32 +429,66 @@ async def envoi_flux_video(websocket, client_id, mode="live", fmt="auto", qualit
 
     try:
         while True:
-            chemin_fichier = os.path.join(dossier_client, f"bloc_{compteur_bloc}{suffix}.dat")
-            # Si le bloc transcodé demandé n'est pas encore sur disque, vérifier le bloc original
-            if not os.path.exists(chemin_fichier) and suffix:
-                chemin_orig = os.path.join(dossier_client, f"bloc_{compteur_bloc}.dat")
-                if os.path.exists(chemin_orig) and edge_transcoder:
-                    try:
-                        with open(chemin_orig, "rb") as f:
-                            raw_bytes = f.read()
-                        transcoded_res = edge_transcoder.process_and_sign_chunk(
-                            session_id=clean_id,
-                            block_id=compteur_bloc,
-                            raw_chunk_payload=raw_bytes,
-                            target_quality="720p",
-                            owner_id=clean_id,
-                        )
-                        write_file_sync(chemin_fichier, json.dumps(transcoded_res).encode("utf-8"))
-                    except Exception as e:
-                        print(f"[{NODE_ID}] Erreur transcodage volée bloc {compteur_bloc}: {e}", flush=True)
+            # Support du sharding Fog (Option B) : recherche du prochain bloc disponible >= compteur_bloc
+            prochain_bloc = None
+            if os.path.exists(dossier_client):
+                try:
+                    fichiers_dispos = [
+                        int(f.split("_")[1].split(".")[0])
+                        for f in os.listdir(dossier_client)
+                        if f.startswith("bloc_")
+                        and (f.endswith(f"{suffix}.dat") if suffix else (f.endswith(".dat") and not f.endswith("_720p.dat")))
+                        and f.split("_")[1].split(".")[0].isdigit()
+                    ]
+                    candidats = sorted([b for b in fichiers_dispos if b >= compteur_bloc])
+                    if candidats:
+                        prochain_bloc = candidats[0]
+                except Exception:
+                    pass
+
+            # Si le bloc original existe mais que le transcodé n'a pas encore été généré
+            if prochain_bloc is None and suffix and os.path.exists(dossier_client):
+                try:
+                    fichiers_orig = [
+                        int(f.split("_")[1].split(".")[0])
+                        for f in os.listdir(dossier_client)
+                        if f.startswith("bloc_") and f.endswith(".dat") and not f.endswith("_720p.dat")
+                        and f.split("_")[1].split(".")[0].isdigit()
+                    ]
+                    candidats_orig = sorted([b for b in fichiers_orig if b >= compteur_bloc])
+                    if candidats_orig:
+                        prochain_bloc = candidats_orig[0]
+                except Exception:
+                    pass
+
+            if prochain_bloc is not None:
+                compteur_bloc = prochain_bloc
+                chemin_fichier = os.path.join(dossier_client, f"bloc_{compteur_bloc}{suffix}.dat")
+                if not os.path.exists(chemin_fichier) and suffix:
+                    chemin_orig = os.path.join(dossier_client, f"bloc_{compteur_bloc}.dat")
+                    if os.path.exists(chemin_orig) and edge_transcoder:
+                        try:
+                            with open(chemin_orig, "rb") as f:
+                                raw_bytes = f.read()
+                            transcoded_res = edge_transcoder.process_and_sign_chunk(
+                                session_id=clean_id,
+                                block_id=compteur_bloc,
+                                raw_chunk_payload=raw_bytes,
+                                target_quality="720p",
+                                owner_id=clean_id,
+                            )
+                            write_file_sync(chemin_fichier, json.dumps(transcoded_res).encode("utf-8"))
+                        except Exception as e:
+                            print(f"[{NODE_ID}] Erreur transcodage volée bloc {compteur_bloc}: {e}", flush=True)
+                            chemin_fichier = chemin_orig
+                    else:
                         chemin_fichier = chemin_orig
-                else:
-                    chemin_fichier = chemin_orig
+            else:
+                chemin_fichier = os.path.join(dossier_client, f"bloc_{compteur_bloc}{suffix}.dat")
 
             if os.path.exists(chemin_fichier):
                 inactivity_counter = 0
                 try:
-                    # Lecture du bloc
                     with open(chemin_fichier, "rb") as f:
                         donnees = f.read()
 

@@ -61,9 +61,31 @@ crypto_client = httpx.AsyncClient(
 
 
 # --- MODÈLES PYDANTIC POUR LA SIGNALISATION PHASE 4 ---
+class NodeAllocationInfo(BaseModel):
+    edge_node_id: str
+    zone_id: str
+    upload_url: str
+    token: Optional[str] = None
+    edge_host: str
+    edge_port: int
+    scheme: str
+
+
+class NodeDownloadInfo(BaseModel):
+    edge_node_id: str
+    zone_id: str
+    download_url: str
+    transcoded_download_url: Optional[str] = None
+    token: Optional[str] = None
+    edge_host: str
+    edge_port: int
+    scheme: str
+
+
 class AllocateStreamRequest(BaseModel):
     session_id: str = Field(..., description="Identifiant unique de session ou email du diffuseur")
     zone_id: Optional[str] = Field(default=None, description="Zone géographique demandée")
+    enable_sharding: Optional[bool] = Field(default=True, description="Active le sharding multi-nœuds Fog si disponible")
 
 
 class AllocateStreamResponse(BaseModel):
@@ -77,6 +99,9 @@ class AllocateStreamResponse(BaseModel):
     edge_port: int
     scheme: str
     paramA: dict
+    allocated_nodes: list[NodeAllocationInfo] = Field(default_factory=list)
+    is_sharded: bool = False
+    shard_count: int = 1
 
 
 class DiscoverStreamResponse(BaseModel):
@@ -96,6 +121,9 @@ class DiscoverStreamResponse(BaseModel):
     scheme: str
     owner_id: str
     paramA: dict
+    nodes: list[NodeDownloadInfo] = Field(default_factory=list)
+    is_sharded: bool = False
+    shard_count: int = 1
 
 
 class DelegationIssueApiRequest(BaseModel):
@@ -206,8 +234,8 @@ def allocate_edge_node(
     db: Session = Depends(get_db),
 ):
     """
-    Plan de Signalisation : Le diffuseur demande l'allocation d'un nœud Fog.
-    Le backend retourne l'adresse WebSocket DIRECTE du nœud Edge.
+    Plan de Signalisation : Le diffuseur demande l'allocation de nœuds Fog.
+    Supporte le Partitionnement Multi-Nœuds / Sharding (Section 3.1 & 3.2 Sellami et al. FGCS 2024).
     Le flux vidéo NE PASSERA PAS par le backend FastAPI (Section 3.5 / Phase 4).
     """
     session_id = req.session_id.strip()
@@ -246,6 +274,31 @@ def allocate_edge_node(
     if not target_node:
         raise HTTPException(status_code=503, detail="Aucun nœud Edge disponible")
 
+    # Détection et sélection des nœuds pour le sharding Fog multi-nœuds (Option B)
+    candidate_nodes = [target_node]
+    if req.enable_sharding is not False:
+        now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+        threshold = now - datetime.timedelta(seconds=60)
+        active_nodes = (
+            db.query(EdgeNode)
+            .filter(EdgeNode.node_id != "Edge_Node_01")
+            .filter(EdgeNode.node_id != target_node.node_id)
+            .filter(EdgeNode.last_seen >= threshold)
+            .all()
+        )
+        if not active_nodes:
+            fallback_threshold = now - datetime.timedelta(minutes=5)
+            active_nodes = (
+                db.query(EdgeNode)
+                .filter(EdgeNode.node_id != "Edge_Node_01")
+                .filter(EdgeNode.node_id != target_node.node_id)
+                .filter(EdgeNode.last_seen >= fallback_threshold)
+                .all()
+            )
+        for an in active_nodes:
+            if an.node_id not in [cn.node_id for cn in candidate_nodes]:
+                candidate_nodes.append(an)
+
     now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
     # Inscription immédiate de la session en base de données
     stream_session = db.query(StreamSession).filter(StreamSession.session_id == session_id).first()
@@ -267,32 +320,57 @@ def allocate_edge_node(
         stream_session.current_zone = effective_zone
         stream_session.last_active = now
 
-    # Mise à jour de l'emplacement des données
-    location = db.query(DataLocation).filter(
-        DataLocation.client_id == session_id,
-        DataLocation.node_id == target_node.node_id,
-    ).first()
-    if not location:
-        location = DataLocation(client_id=session_id, node_id=target_node.node_id)
-        db.add(location)
+    # Mise à jour des emplacements de données et génération des accès pour chaque shard
+    allocated_nodes_info = []
+    for cn in candidate_nodes:
+        location = db.query(DataLocation).filter(
+            DataLocation.client_id == session_id,
+            DataLocation.node_id == cn.node_id,
+        ).first()
+        if not location:
+            location = DataLocation(client_id=session_id, node_id=cn.node_id)
+            db.add(location)
+
+        node_token = create_stream_token(session_id, role="streamer", node_id=cn.node_id)
+        node_upload_url = f"{EDGE_WS_SCHEME}://{cn.ip_address}:{cn.wss_port}/upload/{session_id}?token={node_token}"
+        allocated_nodes_info.append(
+            NodeAllocationInfo(
+                edge_node_id=cn.node_id,
+                zone_id=cn.zone_id,
+                upload_url=node_upload_url,
+                token=node_token,
+                edge_host=cn.ip_address or "127.0.0.1",
+                edge_port=cn.wss_port or 8444,
+                scheme=EDGE_WS_SCHEME,
+            )
+        )
 
     db.commit()
 
-    token = create_stream_token(session_id, role="streamer", node_id=target_node.node_id)
-    upload_url = f"{EDGE_WS_SCHEME}://{target_node.ip_address}:{target_node.wss_port}/upload/{session_id}?token={token}"
-    print(f"[Signalisation] Session {session_id} allouée sur {target_node.node_id} (Zone {target_node.zone_id}, demandée: {effective_zone}) ({upload_url})", flush=True)
+    primary_token = allocated_nodes_info[0].token
+    primary_upload_url = allocated_nodes_info[0].upload_url
+    is_sharded = len(allocated_nodes_info) > 1
+    shard_count = len(allocated_nodes_info)
+
+    print(
+        f"[Signalisation] Session {session_id} allouée (Nœuds={shard_count}, Sharded={is_sharded}, Principal={target_node.node_id})",
+        flush=True,
+    )
 
     return AllocateStreamResponse(
         session_id=session_id,
         edge_node_id=target_node.node_id,
         zone_id=target_node.zone_id,
         current_zone=effective_zone,
-        upload_url=upload_url,
-        token=token,
+        upload_url=primary_upload_url,
+        token=primary_token,
         edge_host=target_node.ip_address or "127.0.0.1",
         edge_port=target_node.wss_port or 8444,
         scheme=EDGE_WS_SCHEME,
         paramA=DEFAULT_PARAM_A,
+        allocated_nodes=allocated_nodes_info,
+        is_sharded=is_sharded,
+        shard_count=shard_count,
     )
 
 
@@ -304,50 +382,92 @@ def discover_stream_node(
     db: Session = Depends(get_db),
 ):
     """
-    Plan d'Annuaire : Le spectateur interroge le backend pour localiser le nœud Edge
-    qui détient le flux vidéo, puis s'y connecte DIRECTEMENT sans transiter par le backend.
+    Plan d'Annuaire : Le spectateur interroge le backend pour localiser les nœuds Fog
+    détenant le flux et ses shards éventuels, puis s'y connecte DIRECTEMENT sans transiter par le backend.
     """
     clean_session_id = session_id.strip()
     session = db.query(StreamSession).filter(StreamSession.session_id == clean_session_id).first()
     target_node_id = session.node_id if session else None
 
-    if not target_node_id:
-        location = db.query(DataLocation).filter(DataLocation.client_id == clean_session_id).first()
-        target_node_id = location.node_id if location else None
+    # 1. Résolution de tous les nœuds détenant des fragments du flux (shards)
+    locations = db.query(DataLocation).filter(DataLocation.client_id == clean_session_id).all()
+    allocated_nodes_db = []
+    seen_ids = set()
 
-    if not target_node_id:
-        # Fallback si le premier nœud actif détient la session
+    for loc in locations:
+        if loc.node_id not in seen_ids:
+            nd = db.query(EdgeNode).filter(EdgeNode.node_id == loc.node_id).first()
+            if nd:
+                allocated_nodes_db.append(nd)
+                seen_ids.add(loc.node_id)
+
+    if not allocated_nodes_db and target_node_id:
+        nd = db.query(EdgeNode).filter(EdgeNode.node_id == target_node_id).first()
+        if nd and nd.node_id not in seen_ids:
+            allocated_nodes_db.append(nd)
+            seen_ids.add(nd.node_id)
+
+    if not allocated_nodes_db:
+        # Fallback si aucun nœud enregistré spécifiquement
         active_nodes = db.query(EdgeNode).all()
         if active_nodes:
-            target_node_id = active_nodes[0].node_id
+            allocated_nodes_db.append(active_nodes[0])
+            seen_ids.add(active_nodes[0].node_id)
         else:
             raise HTTPException(status_code=404, detail=f"Flux {clean_session_id} introuvable")
 
-    # Recherche du nœud Edge le plus approprié pour le visionneur
-    locations = db.query(DataLocation).filter(DataLocation.client_id == clean_session_id).all()
+    # 2. Sélection du nœud principal (source_node) avec affinité de zone pour le visionneur
     source_node = None
-    if viewer_zone and locations:
-        for loc in locations:
-            candidate = db.query(EdgeNode).filter(EdgeNode.node_id == loc.node_id, EdgeNode.zone_id == viewer_zone).first()
-            if candidate:
-                source_node = candidate
+    if viewer_zone:
+        for nd in allocated_nodes_db:
+            if nd.zone_id == viewer_zone:
+                source_node = nd
                 break
 
     if not source_node and target_node_id:
-        source_node = db.query(EdgeNode).filter(EdgeNode.node_id == target_node_id).first()
-
-    if not source_node and locations:
-        source_node = db.query(EdgeNode).filter(EdgeNode.node_id == locations[0].node_id).first()
+        for nd in allocated_nodes_db:
+            if nd.node_id == target_node_id:
+                source_node = nd
+                break
 
     if not source_node:
-        raise HTTPException(status_code=404, detail=f"Nœud hôte pour flux {clean_session_id} introuvable")
+        source_node = allocated_nodes_db[0]
 
-    token = create_stream_token(clean_session_id, role="viewer", node_id=source_node.node_id)
-    download_url = f"{EDGE_WS_SCHEME}://{source_node.ip_address}:{source_node.wss_port}/download/{clean_session_id}?mode={mode}&token={token}"
-    transcoded_download_url = f"{EDGE_WS_SCHEME}://{source_node.ip_address}:{source_node.wss_port}/download/{clean_session_id}?mode={mode}&quality=720p&token={token}"
-    print(f"[Signalisation] Visionneur orienté vers {source_node.node_id} (Direct={download_url}, Transcodé={transcoded_download_url})", flush=True)
+    # Ordonnancement : source_node en premier
+    ordered_nodes = [source_node] + [n for n in allocated_nodes_db if n.node_id != source_node.node_id]
+
+    # 3. Préparation des descripteurs de téléchargement pour chaque shard
+    download_nodes_info = []
+    for nd in ordered_nodes:
+        nd_token = create_stream_token(clean_session_id, role="viewer", node_id=nd.node_id)
+        nd_dl = f"{EDGE_WS_SCHEME}://{nd.ip_address}:{nd.wss_port}/download/{clean_session_id}?mode={mode}&token={nd_token}"
+        nd_t_dl = f"{EDGE_WS_SCHEME}://{nd.ip_address}:{nd.wss_port}/download/{clean_session_id}?mode={mode}&quality=720p&token={nd_token}"
+        download_nodes_info.append(
+            NodeDownloadInfo(
+                edge_node_id=nd.node_id,
+                zone_id=nd.zone_id,
+                download_url=nd_dl,
+                transcoded_download_url=nd_t_dl,
+                token=nd_token,
+                edge_host=nd.ip_address or "127.0.0.1",
+                edge_port=nd.wss_port or 8444,
+                scheme=EDGE_WS_SCHEME,
+            )
+        )
+
+    is_sharded = len(download_nodes_info) > 1
+    shard_count = len(download_nodes_info)
+
+    primary_download_url = download_nodes_info[0].download_url
+    primary_transcoded_url = download_nodes_info[0].transcoded_download_url
+    primary_token = download_nodes_info[0].token
 
     emission_zone = session.zone_id if session and session.zone_id else source_node.zone_id
+    print(
+        f"[Signalisation] Visionneur pour {clean_session_id} (Sharded={is_sharded}, Nœuds={shard_count}, Principal={source_node.node_id})",
+        flush=True,
+    )
+
     return DiscoverStreamResponse(
         session_id=clean_session_id,
         status=session.status if session else "live",
@@ -356,15 +476,18 @@ def discover_stream_node(
         current_zone=source_node.zone_id,
         stream_zone=emission_zone,
         viewer_zone=viewer_zone or source_node.zone_id,
-        download_url=download_url,
-        token=token,
-        transcoded_download_url=transcoded_download_url,
+        download_url=primary_download_url,
+        token=primary_token,
+        transcoded_download_url=primary_transcoded_url,
         supports_transcoding=True,
         edge_host=source_node.ip_address or "127.0.0.1",
         edge_port=source_node.wss_port or 8444,
         scheme=EDGE_WS_SCHEME,
         owner_id=session.owner_email if session else clean_session_id,
         paramA=DEFAULT_PARAM_A,
+        nodes=download_nodes_info,
+        is_sharded=is_sharded,
+        shard_count=shard_count,
     )
 
 

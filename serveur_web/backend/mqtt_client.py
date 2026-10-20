@@ -35,7 +35,7 @@ def get_zone_broker_configs() -> dict[str, dict]:
     tls_z1 = os.getenv("BROKER_TLS_ZONE_1", str(default_tls)).lower() in ("true", "1")
     ca_z1 = os.getenv("BROKER_CA_CERT_ZONE_1", default_ca)
 
-    host_z2 = os.getenv("BROKER_HOST_ZONE_2") or os.getenv("BROKER_HOST_Z2") or default_host
+    host_z2 = os.getenv("BROKER_HOST_ZONE_2") or os.getenv("BROKER_HOST_Z2") or ""
     port_z2 = int(os.getenv("BROKER_PORT_ZONE_2") or os.getenv("BROKER_PORT_Z2") or (8883 if os.getenv("BROKER_TLS_ZONE_2", "false").lower() in ("true", "1") else default_port))
     tls_z2 = os.getenv("BROKER_TLS_ZONE_2", "false").lower() in ("true", "1")
     ca_z2 = os.getenv("BROKER_CA_CERT_ZONE_2", "")
@@ -46,14 +46,15 @@ def get_zone_broker_configs() -> dict[str, dict]:
             "port": port_z1,
             "tls": tls_z1,
             "ca_cert": ca_z1,
-        },
-        "Zone_2": {
-            "host": host_z2,
+        }
+    }
+    if host_z2 and host_z2.strip():
+        configs["Zone_2"] = {
+            "host": host_z2.strip(),
             "port": port_z2,
             "tls": tls_z2,
             "ca_cert": ca_z2,
-        },
-    }
+        }
     return configs
 
 
@@ -68,8 +69,11 @@ def get_mqtt_health() -> dict[str, str]:
     """Rapporte l'état de chaque broker de zone pour le healthcheck FastAPI."""
     configs = get_zone_broker_configs()
     report = {}
-    for z in configs.keys():
-        report[z] = "connected" if _mqtt_status.get(z, False) else "disconnected"
+    for z in ["Zone_1", "Zone_2"]:
+        if z in configs:
+            report[z] = "connected" if _mqtt_status.get(z, False) else "disconnected"
+        else:
+            report[z] = "disconnected"
     return report
 
 

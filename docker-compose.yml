@@ -19,7 +19,7 @@ services:
     networks:
       - pledge_net
     healthcheck:
-      test: ["CMD-SHELL", "timeout 2 nc -z 127.0.0.1 1883 || timeout 2 nc -z 127.0.0.1 8883 || exit 0"]
+      test: ["CMD-SHELL", "timeout 2 nc -z 127.0.0.1 1883 || exit 0"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -99,7 +99,7 @@ services:
     networks:
       - pledge_net
     healthcheck:
-      test: ["CMD-SHELL", "timeout 2 nc -z 127.0.0.1 1883 || timeout 2 nc -z 127.0.0.1 8883 || exit 0"]
+      test: ["CMD-SHELL", "timeout 2 nc -z 127.0.0.1 1883 || exit 0"]
       interval: 15s
       timeout: 5s
       retries: 3
