@@ -357,6 +357,7 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
   const [quality, setQuality] = useState('1080p')
   const [chunksReceived, setChunksReceived] = useState(0)
   const [connectedNode, setConnectedNode] = useState(null)
+  const [activeEdgeNodes, setActiveEdgeNodes] = useState([])
   const [edgeDeliveryZone, setEdgeDeliveryZone] = useState('Zone_1')
   const [streamEmissionZone, setStreamEmissionZone] = useState('Zone_1')
   const [isShardedStream, setIsShardedStream] = useState(false)
@@ -506,6 +507,11 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
       const isSharded = Boolean(discovery.is_sharded && discovery.nodes && discovery.nodes.length > 1)
       setIsShardedStream(isSharded)
       setShardNodesCount(isSharded ? discovery.nodes.length : 1)
+      if (discovery.nodes && discovery.nodes.length > 0) {
+        setActiveEdgeNodes(discovery.nodes.map((n) => ({ id: n.edge_node_id, zone: n.zone_id, host: n.edge_host, port: n.edge_port })))
+      } else if (discovery.edge_node_id) {
+        setActiveEdgeNodes([{ id: discovery.edge_node_id, zone: discovery.zone_id, host: discovery.edge_host, port: discovery.edge_port }])
+      }
 
       const nodesToDownload = isSharded
         ? discovery.nodes
@@ -1104,7 +1110,21 @@ function ViewerInterface({ user, selectedStreamId, onSelectStream, streams }) {
                 <div className="crypto-inspector-box" style={{ marginTop: '12px' }}>
                   <div className="inspector-header-label">Paramètres Cryptographiques & Topologie Multi-Zone</div>
                   <div><strong>Zone d'émission du flux :</strong> {streamEmissionZone === 'Zone_2' ? 'Zone 2 (Zone Secondaire)' : 'Zone 1 (Zone Principale)'}</div>
-                  <div><strong>Nœud Edge local de distribution :</strong> {connectedNode || 'Non spécifié'} ({edgeDeliveryZone === 'Zone_2' ? 'Zone 2' : 'Zone 1'})</div>
+                  <div><strong>Nœud Edge principal (point d'entrée) :</strong> {connectedNode || 'Non spécifié'} ({edgeDeliveryZone === 'Zone_2' ? 'Zone 2' : 'Zone 1'})</div>
+                  {activeEdgeNodes.length > 1 ? (
+                    <div>
+                      <strong>Topologie Fog distribuée (Sharding Option B) :</strong>
+                      <div style={{ margin: '6px 0 6px 12px', display: 'flex', flexDirection: 'column', gap: '3px', fontSize: '11px', color: '#94a3b8' }}>
+                        {activeEdgeNodes.map((nd, idx) => (
+                          <div key={nd.id || idx}>
+                            • <strong style={{ color: nd.id === connectedNode ? '#38bdf8' : '#e2e8f0' }}>{nd.id}</strong> ({nd.zone || 'Zone_1'}) — <code>{nd.host}:{nd.port}</code> {nd.id === connectedNode && <span style={{ color: '#38bdf8', fontSize: '10px' }}>(Principal)</span>}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <div><strong>Topologie Fog :</strong> Nœud unique actif</div>
+                  )}
                   <div><strong>Signataire :</strong> {lastPacketData.signer_id}</div>
                   <div><strong>SIS :</strong> q=4099, l=64, m=1536 (I0={lastPacketData.paramA?.I0}, a={lastPacketData.paramA?.a}, C0={lastPacketData.paramA?.C0})</div>
                   <div><strong>Signature Hess-IBS w1 :</strong> {lastPacketData.signature?.w1}</div>

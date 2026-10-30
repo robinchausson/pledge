@@ -1,367 +1,154 @@
-# Nœud cryptographique de zone
+# Nœud Cryptographique & Serveur d'Identification — `serveur_crypto`
 
-Service Docker autonome chargé des opérations cryptographiques d'une zone : publication des paramètres publics, calcul d'une preuve d'intégrité SIS et génération d'une signature de Hess-IBS.
+[![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.14-blue.svg)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688.svg)](https://fastapi.tiangolo.com/)
+[![Curve](https://img.shields.io/badge/Curve-BN254%20%2F%20Alt--bn128-orange.svg)](https://github.com/ethereum/py_ecc)
+[![TLS](https://img.shields.io/badge/TLS-HTTPS%20:8443-green.svg)](#-sécurité-tls--certificats)
 
-Le nœud expose uniquement une API HTTPS. Il ne contient ni broker MQTT, ni client MQTT, ni interface d'administration, ni logique de streaming. Le broker de la zone peut tourner dans un autre conteneur sur la même machine, mais il n'est pas géré par ce projet.
+Service autonome d'infrastructure cryptographique déployé par zone géographique ou logique. Il implémente les phases 1, 2 et 3 du schéma d'intégrité de référence (*Sellami et al., FGCS 2024*) :
+- **Phase 1** : Preuve d'intégrité matricielle SIS (L'Ecuyer 1994) et signature basée sur l'identité (Hess-IBS sur BN254).
+- **Phase 2** : Serveur d'identification de zone ($IS_s$) dérivant la part secrète $S_w^s = t_s \cdot H_1(ID_w)$ et gestion de la mobilité multi-zone.
+- **Phase 3** : Émission et vérification des clés de délégation de signature pour le transcodage périphérique Fog.
 
-## 1. Architecture
+---
+
+## 🏛️ Architecture & Rôle dans PLEDGE
 
 ```text
-Client appelant
-      |
-      | HTTPS :8443
-      v
-Nœud crypto Docker
-      |
-      +-- paramètres publics de zone
-      +-- calcul SIS de V
-      +-- signature Hess-IBS
-
-Broker MQTT de zone : service externe, non contacté par ce nœud
+ Client Appelant (Streamer, Edge Transcoder ou Backend)
+                       │
+                       │ HTTPS :8443 (ou :8445)
+                       ▼
+ ┌────────────────────────────────────────────────────────┐
+ │           NŒUD CRYPTOGRAPHIQUE FASTAPI (crypto_node.py)│
+ │                                                        │
+ │  1. Paramètres publics & Clé Maîtresse :               │
+ │     - Scalaire secret de zone : ts                     │
+ │     - Clé publique maîtresse : PK_s = ts · P_pub       │
+ │                                                        │
+ │  2. Preuve d'Intégrité SIS (Short Integer Solution) :  │
+ │     - Générateur matriciel L'Ecuyer (l=64, m=1536)     │
+ │     - Calcul matriciel : V = (A · X) mod 4099          │
+ │                                                        │
+ │  3. Signature Hess-IBS & Accouplements BN254 :         │
+ │     - Signature directe : Sw = ts · H1(ID_w)           │
+ │     - Délégation Fog proxy : DK_d = Sw + y · H1(ID_d)  │
+ │     - Audit à 3 accouplements : e(w2, P) · e(...)      │
+ └────────────────────────────────────────────────────────┘
 ```
 
-Une instance du nœud doit être déployée par zone. Chaque instance possède sa propre clé de zone et son propre certificat TLS.
+---
 
-## 2. Prérequis
+## 📐 Paramètres Cryptographiques Conformes au Papier
 
-- Docker Engine ou Docker Desktop ;
-- Docker Compose v2 ;
-- un scalaire secret de zone conservé hors du dépôt ;
-- en production, un certificat TLS et sa clé privée signés par l'autorité de certification utilisée par les clients.
+### 1. Générateur Matriciel SIS (L'Ecuyer 1994)
+La matrice $A \in \mathbb{Z}_q^{l \times m}$ est générée de manière déterministe en $O(1)$ à partir des paramètres publics $paramA = (I_0, a, C_0)$ sans avoir à stocker les $64 \times 1536 = 98\,304$ coefficients :
+$$I_{n+1} = (a \cdot I_n + C_n) \bmod q, \quad C_{n+1} = \lfloor(a \cdot I_n + C_n) / q\rfloor$$
 
-Le service utilise Python 3.11 dans l'image Docker et les bibliothèques suivantes :
+| Paramètre | Symbole | Valeur du Papier | Description |
+| :--- | :---: | :---: | :--- |
+| **Lignes** | $l$ | `64` | Dimension du vecteur de preuve résumée |
+| **Colonnes** | $m$ | `1536` | Dimension du vecteur binaire développé |
+| **Modulo** | $q$ | `4099` | Premier supérieur à $2^{12}$ |
+| **Graine $I_0$** | $I_0$ | `1234` | État initial de congruence linéaire |
+| **Multiplicateur $a$** | $a$ | `3141` | Facteur de récurrence pseudo-aléatoire |
+| **Report $C_0$** | $C_0$ | `567` | Valeur initiale du report de division |
 
-- FastAPI et Uvicorn pour l'API HTTPS ;
-- NumPy pour le calcul matriciel SIS ;
-- `py_ecc` pour les opérations BN128 et le pairing.
+### 2. Schéma de Hess-IBS sur Courbe BN254
+- **Groupes** : $G_1, G_2$ de torsion sur la courbe elliptique `alt_bn128` (ordre $r \approx 2^{254}$).
+- **Accouplement bilinéaire optimal** : $e: G_1 \times G_2 \to G_T$.
+- **Challenge** : $w_1 = H_2(V, paramA, r) \in \mathbb{Z}_r^*$.
+- **Signature** : $\sigma = (w_1, w_2) \in \mathbb{Z}_r^* \times G_1$.
 
-## 3. Démarrage
+---
 
-Toutes les commandes se lancent depuis la racine du dépôt, là où se trouve `docker-compose.yml`.
+## 📡 Endpoints de l'API HTTPS (`:8443`)
 
-### Démarrage standard
+| Méthode | Route | Rôle & Description |
+| :--- | :--- | :--- |
+| `GET` | `/health` | Contrôle de santé Docker et sonde backend (`{"status": "ok", "zone_id": "Zone_1"}`) |
+| `GET` | `/api/v1/crypto/parameters` | Retourne $PK_s$, $paramA$ et les dimensions SIS ($l, m, q$) |
+| `POST` | `/api/v1/auth/identify` | Émet la part secrète $S_w^s = t_s \cdot H_1(ID_w)$ pour un diffuseur |
+| `POST` | `/api/v1/crypto/mobility/accumulate` | Calcule l'accumulation homomorphe des clés ($S_w \leftarrow \sum S_w^k$, $PK \leftarrow \sum PK_k$) |
+| `POST` | `/api/v1/crypto/integrity` | Calcule le vecteur SIS $V = (A \cdot x_i) \bmod q$ pour un fragment binaire |
+| `POST` | `/api/v1/crypto/sign` | Signe un bloc vidéo selon le schéma Hess-IBS |
+| `POST` | `/api/v1/crypto/verify` | Vérifie publiquement la signature d'un bloc par couplage de Weil/Tate |
+| `POST` | `/api/v1/crypto/delegation/issue` | Génère une clé de délégation Fog $DK_d$ pour un nœud Edge |
+| `POST` | `/api/v1/crypto/signature/delegate` | Appose la signature de transcodage avec clé déléguée |
+| `POST` | `/api/v1/crypto/verify/delegate` | Vérification de signature déléguée avec 3 accouplements bilinéaires |
 
+---
+
+## 🔒 Sécurité TLS & Certificats
+
+Le conteneur est configuré pour exiger HTTPS :
+1. **Mode Développement / Local** : Le script [`docker-entrypoint.sh`](docker-entrypoint.sh) génère automatiquement une paire certificat/clé autosignée dans `./certs/` si absente.
+2. **Mode Production** : Déposer le certificat et la clé signés par votre autorité dans `certs/tls.crt` et `certs/tls.key`.
+
+---
+
+## ⚙️ Configuration d'Environnement
+
+Définie dans le fichier `.env` ou injectée par Docker Compose :
+
+| Variable | Exemple | Description |
+| :--- | :--- | :--- |
+| `ZONE_ID` | `Zone_1` | Identifiant de zone géographique |
+| `CRYPTO_SECRET_SCALAR` | `123456789` | Entier secret $t_s \in [1, r-1]$ dérivant la clé publique maîtresse |
+| `CRYPTO_PORT` | `8443` | Port d'écoute HTTPS externe du conteneur |
+| `TLS_CERT_FILE` | `/certs/tls.crt` | Emplacement du certificat TLS dans le conteneur |
+| `TLS_KEY_FILE` | `/certs/tls.key` | Emplacement de la clé privée TLS dans le conteneur |
+
+---
+
+## 🚀 Commandes de Démarrage
+
+### Mode 1 : Démarrage Local (Simulation Monomachine)
 ```bash
-docker compose up -d --build
-```
+cd serveur_crypto
 
-Le conteneur s'appelle `crypto_node_zone_alpha` et écoute sur `https://localhost:8443`.
+# Démarrer le conteneur sur le port 8443
+docker compose -f docker-compose.local.yml up -d --build
 
-### Vérification du service
-
-```bash
-docker compose ps
-docker compose logs -f crypto-node
+# Vérifier le contrôle de santé
 curl -k https://localhost:8443/health
+
+# Arrêter le conteneur
+docker compose -f docker-compose.local.yml down
 ```
 
-Réponse attendue pour le contrôle de santé :
-
-```json
-{"status":"ok"}
-```
-
-### Arrêt et suppression du conteneur
-
+### Mode 2 : Démarrage en Réseau LAN Dédié
 ```bash
-docker compose down
-```
+cd serveur_crypto
+cp .env.example .env
 
-`docker compose down` arrête uniquement le nœud crypto. Il ne modifie aucun broker externe.
-
-## 4. Configuration
-
-La configuration est définie dans `docker-compose.yml`.
-
-| Variable | Valeur par défaut | Description |
-| --- | --- | --- |
-| `CRYPTO_SECRET_SCALAR` | vide | Scalaire secret utilisé pour dériver la clé publique de zone. À définir en production. |
-| `TLS_CERT_FILE` | `/certs/tls.crt` | Chemin du certificat TLS dans le conteneur. |
-| `TLS_KEY_FILE` | `/certs/tls.key` | Chemin de la clé privée TLS dans le conteneur. |
-
-### Définir le secret de zone
-
-Le scalaire doit être un entier strictement compris entre `1` et `curve_order - 1`, où `curve_order` est l'ordre du groupe BN128.
-
-Sous Linux/macOS :
-
-```bash
-export CRYPTO_SECRET_SCALAR='123456789'
+# Démarrer le service
 docker compose up -d --build
 ```
 
-Sous PowerShell :
+### Mode 3 : Exécution Native Python (Développement sans Docker)
+```bash
+# Installer les dépendances
+pip install -r requirements.txt
 
-```powershell
-$env:CRYPTO_SECRET_SCALAR = "123456789"
-docker compose up -d --build
+# Lancer le serveur avec Uvicorn en HTTPS
+CRYPTO_SECRET_SCALAR=123456789 uvicorn crypto_node:app \
+  --host 0.0.0.0 --port 8443 \
+  --ssl-certfile certs/tls.crt --ssl-keyfile certs/tls.key
 ```
 
-Ne versionnez jamais cette valeur dans Git. Il est recommandé d'utiliser un gestionnaire de secrets en production et de conserver la même valeur après chaque redémarrage.
+---
 
-Si la variable est absente, le nœud génère un scalaire aléatoire au démarrage. Cette identité est temporaire : la clé publique changera au prochain redémarrage.
+## 🧪 Exemple d'Appel API avec cURL
 
-## 5. TLS
-
-Le script `docker-entrypoint.sh` vérifie les fichiers indiqués par `TLS_CERT_FILE` et `TLS_KEY_FILE` :
-
-- s'ils existent, ils sont utilisés ;
-- s'ils sont absents, un certificat RSA autosigné valable 365 jours est généré dans le volume `./certs`.
-
-Le certificat autosigné est pratique pour le développement. Les clients doivent alors désactiver la vérification du certificat, par exemple avec `curl -k`. Ce comportement ne doit pas être utilisé tel quel en production.
-
-Pour la production :
-
-1. placer le certificat dans `certs/tls.crt` ;
-2. placer sa clé privée dans `certs/tls.key` ;
-3. protéger les permissions de la clé privée ;
-4. redémarrer le conteneur.
-
-Le répertoire `certs` est ignoré par Git pour éviter de publier des clés privées et des certificats locaux.
-
-## 6. Paramètres cryptographiques
-
-### SIS
-
-Pour un fragment binaire $D$, le nœud calcule :
-
-1. `H3(D)` avec SHA-256 ;
-2. un vecteur `X` de taille `m = 1536` en répétant le digest ;
-3. une matrice pseudo-aléatoire `A` de dimension `l x m` avec la graine publique `paramA = 42` ;
-4. `V = (A x X) mod q` avec `q = 4099`.
-
-Paramètres utilisés :
-
-| Paramètre | Valeur |
-| --- | --- |
-| `paramA` | `42` |
-| `l` | `64` |
-| `m` | `1536` |
-| `q` | `4099` |
-| Fonction de hachage | SHA-256 |
-
-Le résultat `V_matrix` contient donc 64 entiers compris entre `0` et `4098`.
-
-### Hess-IBS / BN128
-
-Le nœud utilise la courbe `bn128` et le groupe `G1` :
-
-- génération d'un nonce aléatoire ;
-- génération d'un point `p1` ;
-- calcul d'un pairing dans `G2` ;
-- dérivation du challenge `w1` avec SHA-256 ;
-- calcul du point `w2`.
-
-La réponse de signature contient :
-
-- `w1` : challenge scalaire ;
-- `w2` : point de signature sous forme `[x, y]` ;
-- `p1` : point public auxiliaire sous forme `[x, y]`.
-
-### Note sur la gestion actuelle du secret
-
-L'implémentation actuelle dérive `public_key = secret_scalar * G1` au démarrage et utilise cette valeur comme `secret_share` pour la signature. Cela représente le nœud crypto autonome actuel, mais ne constitue pas encore un KGC distribué avec attribution de shares à des identités. Une intégration KGC devra remplacer cette initialisation avant un déploiement cryptographique définitif.
-
-## 7. API HTTPS
-
-Toutes les routes sont servies en HTTPS sur le port `8443`.
-
-### `GET /`
-
-Vérifie que l'application répond.
-
-Réponse :
-
-```json
-{"service":"crypto-node","status":"ok"}
-```
-
-### `GET /health`
-
-Route destinée aux sondes Docker ou à un reverse proxy.
-
-Réponse :
-
-```json
-{"status":"ok"}
-```
-
-### `GET /api/v1/crypto/parameters`
-
-Retourne les paramètres nécessaires aux clients pour interpréter les preuves et signatures de la zone.
-
-Exemple :
-
+### Récupération des paramètres publics
 ```bash
 curl -k https://localhost:8443/api/v1/crypto/parameters
 ```
 
-Réponse :
-
-```json
-{
-  "curve": "bn128",
-  "public_key": [1, 2],
-  "paramA": 42,
-  "sis": {
-    "l": 64,
-    "m": 1536,
-    "q": 4099,
-    "hash": "SHA-256"
-  },
-  "signature": {
-    "scheme": "Hess-IBS",
-    "group": "G1"
-  }
-}
-```
-
-Les valeurs `[1, 2]` sont uniquement illustratives ; la réponse réelle contient les coordonnées de la clé publique BN128.
-
-### `POST /api/v1/crypto/integrity`
-
-Calcule la preuve d'intégrité SIS d'un fragment.
-
-Corps JSON :
-
-```json
-{
-  "fragment_data": "ZnJhZ21lbnQtdGVzdA==",
-  "paramA": 42
-}
-```
-
-`fragment_data` doit être le fragment binaire encodé en Base64. `paramA` est optionnel et vaut `42` par défaut.
-
-Exemple :
-
+### Calcul d'une preuve d'intégrité SIS
 ```bash
 curl -k -X POST https://localhost:8443/api/v1/crypto/integrity \
   -H "Content-Type: application/json" \
-  -d '{"fragment_data":"ZnJhZ21lbnQtdGVzdA==","paramA":42}'
+  -d '{"payload_b64":"VGVzdCBkZSBibG9jIHZpZMOpbyBQbGVkZ2U=","paramA":{"I0":1234,"a":3141,"C0":567}}'
 ```
-
-Réponse :
-
-```json
-{
-  "paramA": 42,
-  "V_matrix": [0, 123, 2048]
-}
-```
-
-L'exemple de matrice est tronqué ; la réponse réelle contient 64 valeurs.
-
-### `POST /api/v1/crypto/signature`
-
-Calcule la preuve SIS puis signe cette preuve.
-
-Exemple :
-
-```bash
-curl -k -X POST https://localhost:8443/api/v1/crypto/signature \
-  -H "Content-Type: application/json" \
-  -d '{"fragment_data":"ZnJhZ21lbnQtdGVzdA==","paramA":42}'
-```
-
-Réponse :
-
-```json
-{
-  "paramA": 42,
-  "V_matrix": [0, 123, 2048],
-  "signature": {
-    "w1": 123456,
-    "w2": [111, 222],
-    "p1": [333, 444]
-  }
-}
-```
-
-Les valeurs et la matrice de cet exemple sont illustratives. `w2` et `p1` contiennent chacun deux coordonnées réelles du groupe `G1`.
-
-## 8. Codes d'erreur
-
-| Code | Cause |
-| --- | --- |
-| `200` | Requête traitée avec succès. |
-| `422` | JSON invalide, Base64 invalide ou `paramA` différent de `42`. |
-| `503` | Paramètres demandés avant l'initialisation de la clé de zone. |
-| `500` | Erreur interne ou état cryptographique invalide. |
-
-Exemple de rejet d'un mauvais `paramA` :
-
-```json
-{"detail":"paramA doit valoir 42"}
-```
-
-## 9. Intégration avec un autre service
-
-Le service appelant doit :
-
-1. récupérer les paramètres avec `GET /api/v1/crypto/parameters` ;
-2. conserver le fragment original ;
-3. l'encoder en Base64 ;
-4. appeler `/integrity` ou `/signature` avec `paramA = 42` ;
-5. associer `V_matrix` et `signature` au fragment transmis ;
-6. transmettre ces données au broker ou au service suivant de l'architecture.
-
-Le nœud ne publie rien et ne connaît pas le topic MQTT. Cette séparation permet de remplacer le broker sans modifier le conteneur crypto.
-
-## 10. Développement local sans Docker
-
-Pour tester l'application avec un environnement Python local :
-
-```bash
-pip install -r requirements.txt
-CRYPTO_SECRET_SCALAR=123456 \
-uvicorn crypto_node:app --host 0.0.0.0 --port 8443 \
-  --ssl-certfile certs/tls.crt --ssl-keyfile certs/tls.key
-```
-
-Les certificats doivent exister avant cette commande. Le chemin recommandé reste le démarrage Docker, qui les génère automatiquement pour le développement.
-
-## 11. Dépannage
-
-### Le conteneur redémarre en boucle
-
-Consulter les logs :
-
-```bash
-docker compose logs crypto-node
-```
-
-Causes fréquentes :
-
-- `CRYPTO_SECRET_SCALAR` n'est pas un entier ;
-- le scalaire est nul ou hors de l'intervalle BN128 ;
-- la clé TLS montée est invalide ou ne correspond pas au certificat ;
-- le port `8443` est déjà utilisé.
-
-### Le navigateur signale un certificat non fiable
-
-C'est attendu avec le certificat autosigné de développement. Utiliser un certificat signé en production. Avec `curl`, `-k` désactive uniquement la vérification pour les tests locaux.
-
-### Le client reçoit `422`
-
-Vérifier que :
-
-- le corps possède l'en-tête `Content-Type: application/json` ;
-- `fragment_data` est du Base64 valide ;
-- `paramA` vaut `42`.
-
-### Le client reçoit `503`
-
-Le nœud n'a pas terminé son initialisation. Vérifier les logs et attendre que Uvicorn indique que l'application est prête.
-
-## 12. Vérifications du dépôt
-
-Commandes utiles avant livraison :
-
-```bash
-python -m py_compile crypto_node.py
-docker compose config
-docker compose build
-```
-
-Le build ne démarre ni ne configure de broker MQTT.
