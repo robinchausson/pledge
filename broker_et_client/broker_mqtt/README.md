@@ -131,6 +131,13 @@ mosquitto_sub -h localhost -p 8883 --cafile certs/ca.crt -t "telemetrie/#" -v
 
 - **`Permission denied: /mosquitto/certs/server.key`** :
   L'utilisateur Mosquitto tourne avec l'UID `1883`. Le script `entrypoint.sh` ajuste automatiquement les permissions (`chown -R 1883:1883 /mosquitto/certs`), mais sous Linux assurez-vous que le répertoire hôte `certs/` ne soit pas verrouillé en `root:root`.
-- **`Bind: Une tentative d'accès à un socket de manière interdite` (Windows)** :
-  Le port `1883` ou `8883` est déjà utilisé par un service local (ex: autre instance Mosquitto ou service IoT Windows). Arrêtez le service concurrent avec `netstat -ano | findstr 1883` ou changez le port dans `.env`.
+- **`Bind: Une tentative d'accès à un socket de manière interdite` (Windows Code 10013 / WSAEACCES)** :
+  Windows NAT (WinNAT) ou un service local réserve la plage dynamique de ports incluant `8883` ou `8000`. 
+  1. Les fichiers Compose utilisent désormais les ports hôtes par défaut `18883` (Z1) et `18884` (Z2) pour MQTTS.
+  2. Pour libérer définitivement les ports réservés par WinNAT sur Windows, exécutez dans un terminal PowerShell Administrateur :
+     ```powershell
+     net stop winnat
+     netsh int ipv4 set dynamicport tcp start=49152 num=16384
+     net start winnat
+     ```
 

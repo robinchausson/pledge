@@ -129,8 +129,8 @@ pledge/
 | :--- | :---: | :---: | :---: | :--- |
 | **Backend API** | `8000` | `8000` | TCP / HTTP & WS | Contrôleur central, authentification JWT, annuaire de signalisation |
 | **Frontend Web** | `5173` | `5173` | TCP / HTTP | Interface utilisateur React / Vite (studio & lecteur) |
-| **Broker Mosquitto Z1** | `1883` / `8883` | `1883` / `8883` | TCP / MQTT(S) | Télémétrie et bus d'événements Zone 1 |
-| **Broker Mosquitto Z2** | `1883` / `8883` | `1884` / `8884` | TCP / MQTT(S) | Télémétrie et bus d'événements Zone 2 |
+| **Broker Mosquitto Z1** | `1883` / `8883` | `1883` / `18883` | TCP / MQTT(S) | Télémétrie et bus d'événements Zone 1 |
+| **Broker Mosquitto Z2** | `1883` / `8883` | `1884` / `18884` | TCP / MQTT(S) | Télémétrie et bus d'événements Zone 2 |
 | **Nœud Crypto Z1** | `8443` | `8443` | TCP / HTTPS | Preuves SIS et paramètres publics de la Zone 1 |
 | **Nœud Crypto Z2** | `8443` | `8445` | TCP / HTTPS | Preuves SIS et paramètres publics de la Zone 2 |
 | **Nœud Fog Edge Z1** | `8444` | `8444` | TCP / WS(S) | Upload / Download streaming direct et stockage Zone 1 |
@@ -218,6 +218,26 @@ Résultats clés mesurés :
 - **Résistance aux altérations :** Rejet à 100% de toute trame corrompue (1 bit modifié = invalidation immédiate).
 
 ---
+
+---
+
+## 🛠️ Dépannage & FAQ
+
+### Erreur Windows : `bind: Une tentative d'accès à un socket de manière interdite par ses autorisations d'accès` (Code 10013 / WSAEACCES)
+- **Origine :** Sous Windows 10/11 avec WSL2 ou Hyper-V activé, le pilote réseau Windows NAT (`WinNAT`) alloue dynamiquement des plages d'exclusion de ports dans une plage commençant anormalement à `1024` au lieu de `49152`. Des ports standards de développement comme `8000`, `8883` ou `8080` peuvent alors être verrouillés arbitrairement par le noyau Windows (`netsh interface ipv4 show excludedportrange protocol=tcp`).
+- **Solution définitive (PowerShell Administrateur) :**
+  Exécutez cette commande en mode Administrateur pour libérer immédiatement les ports et configurer la plage dynamique Windows sur le standard IANA (49152-65535) :
+  ```powershell
+  net stop winnat
+  netsh int ipv4 set dynamicport tcp start=49152 num=16384
+  net start winnat
+  ```
+- **Alternative par variable d'environnement :** Si vous ne disposez pas des privilèges administrateur sur votre machine, vous pouvez surcharger les ports hôtes dans votre fichier `.env` :
+  ```bash
+  BACKEND_PORT=8448
+  MQTTS_PORT_ZONE_1=18883
+  MQTTS_PORT_ZONE_2=18884
+  ```
 
 ## 📚 Documentation des Sous-Systèmes
 
