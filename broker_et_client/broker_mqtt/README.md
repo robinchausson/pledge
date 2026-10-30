@@ -133,3 +133,4 @@ mosquitto_sub -h localhost -p 8883 --cafile certs/ca.crt -t "telemetrie/#" -v
   L'utilisateur Mosquitto tourne avec l'UID `1883`. Le script `entrypoint.sh` ajuste automatiquement les permissions (`chown -R 1883:1883 /mosquitto/certs`), mais sous Linux assurez-vous que le répertoire hôte `certs/` ne soit pas verrouillé en `root:root`.
 - **`Bind: Une tentative d'accès à un socket de manière interdite` (Windows)** :
   Le port `1883` ou `8883` est déjà utilisé par un service local (ex: autre instance Mosquitto ou service IoT Windows). Arrêtez le service concurrent avec `netstat -ano | findstr 1883` ou changez le port dans `.env`.
+

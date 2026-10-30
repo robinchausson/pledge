@@ -137,3 +137,4 @@ pytest tests/test_backend_admin_mqtt.py -v
 # Tester la décentralisation et le plan de signalisation
 pytest tests/test_phase4_decentralization.py -v
 ```
+

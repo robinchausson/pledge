@@ -106,3 +106,4 @@ Extrait des résultats obtenus lors des tests de performance automatisés (`test
 | **Vérification Hess-IBS (Pairing BN254)** | **24.31 ms** | $\approx 25$ ms | ✅ Temps réel |
 | **Audit Spectateur Global** | **~24.5 ms** | Non-bloquant pour MSE | ✅ Validé |
 | **Détection d'Altération** | 100% des corruptions rejetées | Théorèmes 1 & 2 | ✅ Infalsifiable |
+

@@ -142,3 +142,4 @@ NODE_ID=Local_Edge NODE_HOST=127.0.0.1 EDGE_WS_PORT=8444 python client_edge.py
    ```
 3. **Tester la purge automatique** :
    Le nœud supprime automatiquement les flux inactifs depuis plus de 60 secondes pour préserver le stockage périphérique.
+

@@ -157,3 +157,4 @@ Réponse attendue lorsque l'ensemble des liaisons est actif :
 Pour les spécifications complètes de chaque module :
 - 👉 [Documentation technique du Backend FastAPI](backend/README.md)
 - 👉 [Documentation technique du Frontend React](frontend/README.md)
+

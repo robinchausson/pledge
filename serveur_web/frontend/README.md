@@ -132,3 +132,4 @@ Le fichier `.env` ou les variables Vite permettent d'ajuster l'URL du backend :
 VITE_API_URL=http://localhost:8000
 ```
 Pour un accès depuis d'autres appareils du réseau local, remplacez `localhost` par l'IP LAN de votre machine hôte (ex: `http://192.168.1.100:8000`).
+
