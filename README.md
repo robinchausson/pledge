@@ -127,7 +127,7 @@ pledge/
 
 | Service | Port Interne | Port Hôte (Local) | Protocole | Rôle & Usage |
 | :--- | :---: | :---: | :---: | :--- |
-| **Backend API** | `8000` | `8000` | TCP / HTTP & WS | Contrôleur central, authentification JWT, annuaire de signalisation |
+| **Backend API** | `8000` | `8448` | TCP / HTTP & WS | Contrôleur central, authentification JWT, annuaire de signalisation |
 | **Frontend Web** | `5173` | `5173` | TCP / HTTP | Interface utilisateur React / Vite (studio & lecteur) |
 | **Broker Mosquitto Z1** | `1883` / `8883` | `1883` / `18883` | TCP / MQTT(S) | Télémétrie et bus d'événements Zone 1 |
 | **Broker Mosquitto Z2** | `1883` / `8883` | `1884` / `18884` | TCP / MQTT(S) | Télémétrie et bus d'événements Zone 2 |
@@ -158,7 +158,8 @@ docker compose -f docker-compose.local.yml ps
 
 Une fois démarré :
 - 🌐 **Interface Web :** Ouvrir [http://localhost:5173](http://localhost:5173)
-- 🔍 **Contrôle de Santé :** Ouvrir [http://localhost:8000/health](http://localhost:8000/health)
+- 📖 **Documentation API Swagger :** Ouvrir [http://localhost:5173/docs](http://localhost:5173/docs) (ou [http://localhost:8448/docs](http://localhost:8448/docs))
+- 🔍 **Contrôle de Santé :** Ouvrir [http://localhost:5173/health](http://localhost:5173/health) (ou [http://localhost:8448/health](http://localhost:8448/health))
 - 🛑 **Arrêt complet :** `docker compose -f docker-compose.local.yml down`
 
 ---

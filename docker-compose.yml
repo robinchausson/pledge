@@ -168,7 +168,7 @@ services:
     container_name: pledge_backend
     restart: always
     ports:
-      - "${BACKEND_PORT:-8000}:8000"
+      - "${BACKEND_PORT:-8448}:8000"
     environment:
       # Brokers par zone
       BROKER_HOST_ZONE_1: ${BROKER_HOST_ZONE_1:-broker_mqtt_zone_1}

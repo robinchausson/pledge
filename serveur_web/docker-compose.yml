@@ -4,7 +4,7 @@ services:
     container_name: pledge_backend
     restart: always
     ports:
-      - "${BACKEND_PORT:-8000}:8000"
+      - "${BACKEND_PORT:-8448}:8000"
     environment:
       - BROKER_HOST_ZONE_1=${BROKER_HOST_ZONE_1:-127.0.0.1}
       - BROKER_PORT_ZONE_1=${BROKER_PORT_ZONE_1:-1883}
@@ -38,4 +38,4 @@ services:
     ports:
       - "${FRONTEND_PORT:-5173}:5173"
     environment:
-      - VITE_API_URL=${VITE_API_URL:-${LAN_URL_BACKEND:-http://127.0.0.1:8000}}
+      - VITE_API_URL=${VITE_API_URL:-}

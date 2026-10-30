@@ -4,7 +4,7 @@ services:
     container_name: pledge_backend
     restart: always
     ports:
-      - "8000:8000"
+      - "${BACKEND_PORT:-8448}:8000"
     environment:
       - BROKER_HOST=host.docker.internal
       - BROKER_PORT=1883
